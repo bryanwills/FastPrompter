@@ -1,0 +1,3196 @@
+import copy
+import ctypes
+import ctypes.wintypes
+import math
+import os
+import shutil
+import sys
+import time
+
+from PyQt6 import sip
+from PyQt6.QtCore import (
+    QEvent,
+    QMimeData,
+    Qt,
+    QTimer,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QKeySequence,
+    QShortcut,
+    QTextCursor,
+    QTextDocument,
+    QTextOption,
+)
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QTabBar,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+user32 = ctypes.windll.user32
+user32.RegisterHotKey.argtypes = [
+    ctypes.wintypes.HWND,
+    ctypes.c_int,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.UINT,
+]
+user32.RegisterHotKey.restype = ctypes.wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = ctypes.wintypes.BOOL
+
+from fastprompter.core.state import FastPrompterState
+from fastprompter.utils.paths import get_data_dir
+
+SERVER_NAME = "FastPrompter_Server_V15"
+
+from fastprompter.core.hotkey_filter import HotkeyFilter
+from fastprompter.core.sound_manager import SoundManager
+from fastprompter.theme.themes import THEMES
+from fastprompter.ui.editor import VaultTextEdit
+from fastprompter.ui.formatting_mixin import FormattingMixin
+from fastprompter.ui.hotkey_mixin import HotkeyMixin
+from fastprompter.ui.markdown_highlighter import MarkdownHighlighter
+from fastprompter.ui.pie_menu import QuickListWidget
+from fastprompter.ui.resizers import EdgeResizer
+from fastprompter.ui.scaling_mixin import ScalingMixin
+from fastprompter.ui.search_mixin import SearchMixin
+from fastprompter.ui.settings import ColorConfigDialog, HotkeySettingsDialog
+from fastprompter.ui.snippet_ops_mixin import SnippetOpsMixin
+from fastprompter.ui.snippet_panel import (
+    DraggableSiloButton,
+    DropVerticalWidget,
+    SiloDropWidget,
+    SnippetWidget,
+    WheelPager,
+)
+from fastprompter.ui.theme_mixin import ThemeMixin
+from fastprompter.ui.tray_mixin import TrayMixin
+from fastprompter.ui.window_mixin import WindowMixin
+
+
+def try_connect_to_server(retries=3, delay=0.05):
+    import tempfile
+
+    token_file = os.path.join(tempfile.gettempdir(), "fastprompter_ipc.token")
+    token = ""
+    if os.path.exists(token_file):
+        try:
+            with open(token_file) as f:
+                token = f.read().strip()
+        except Exception:
+            pass
+
+    for _ in range(retries):
+        sock = QLocalSocket()
+        sock.connectToServer(SERVER_NAME)
+        if sock.waitForConnected(100):
+            # Pass token as property to be picked up by main_entry
+            if token:
+                sock.setProperty("ipc_token", token)
+            return sock
+        time.sleep(delay)
+    return None
+
+
+class FastPrompter(
+    FormattingMixin,
+    HotkeyMixin,
+    ScalingMixin,
+    SearchMixin,
+    SnippetOpsMixin,
+    ThemeMixin,
+    TrayMixin,
+    WindowMixin,
+    QMainWindow,
+):
+    # Live settings accessors used by the UI mixins.
+    @property
+    def _font_size(self):
+        try:
+            return int(float(self.data.get("font_size", 11)))
+        except Exception:
+            return 11
+
+    @property
+    def _font_family(self):
+        return self.data.get("font_family", "Verdana")
+
+    @property
+    def _ui_scale(self):
+        try:
+            return float(self.data.get("ui_scale", 1.0))
+        except Exception:
+            return 1.0
+
+    @property
+    def _button_scale(self):
+        try:
+            return float(self.data.get("button_scale", 1.0))
+        except Exception:
+            return 1.0
+
+    @property
+    def _sidebar_right(self):
+        return self.data.get("sidebar_right", "False") == "True"
+
+    @property
+    def _always_on_top(self):
+        return self.data.get("always_on_top", "True") == "True"
+
+    @property
+    def _normal_window(self):
+        return self.data.get("normal_window", "False") == "True"
+
+    @property
+    def _tray_visible(self):
+        return self.data.get("tray_visible", "True") == "True"
+
+    def _refresh_settings_cache(self):
+        """Settings are read live from self.data via properties; nothing to refresh."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMouseTracking(True)
+        # QApplication.instance().installEventFilter(self)
+        self.ignore_focus_loss, self.registered_hotkeys, self._db_dirty = False, [], False
+
+        self.editing_snippet = None
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self._auto_save_tick)
+        self.auto_save_timer.start(10000)
+
+        self.snap_index, self._snap_first_press, self._preview_connected = 0, True, False
+        self.current_pages, self.silo_page, self.ui_scale = {}, 0, 1.0
+        self.arc_silo_page, self.arc_page = 0, 0
+        self.is_locked, self._suspend_cache, self._locked_geometry = False, False, None
+        self._initializing_ui, self._suspend_temp_sync = True, True
+
+        self.silo_last_edited = {}  # {slot_index: timestamp} for color-last-edited system
+        self._visible_silos = 10  # dynamically adjusted
+        self._snippet_widget_cache = {}  # {(cat, idx): widget} for O(1) lookup
+
+        self.setup_single_instance_server()
+        self.state = FastPrompterState()
+        self.data = self.state.data
+        self.conn = self.state.conn
+        self.sound_manager = SoundManager(self, self.data)
+        self._theme_cache, self._theme_cache_name = THEMES["Default"], None
+        self._custom_colors_cache, self._custom_colors_cache_key = {}, None
+        self._font_cache_key, self._cached_main_font = None, None
+        try:
+            self.active_temp_slot = int(self.data.get("active_temp_slot", 0))
+        except Exception:
+            self.active_temp_slot = 0
+        try:
+            raw_silo_edited = self.data.get("silo_last_edited", {})
+            self.silo_last_edited = {int(k): int(v) for k, v in raw_silo_edited.items()}
+        except Exception:
+            self.silo_last_edited = {}
+
+        self.init_ui()
+        self.init_tray()
+        self.setup_global_shortcuts()
+        self._apply_tooltips()
+        # Delay global hotkey binding until after UI initialization to prevent race conditions causing silent crashes (Debater Constraint)
+        QTimer.singleShot(100, lambda: not sip.isdeleted(self) and self.register_all_hotkeys())
+
+        self._switch_to_slot(self.active_temp_slot, initial=True)
+        self._initializing_ui, self._suspend_temp_sync = False, False
+        self.apply_font()
+        self.apply_theme()
+
+        self.topmost_timer = QTimer(self)
+        self.topmost_timer.timeout.connect(self.enforce_topmost)
+        if self.data.get("always_on_top", "True") == "True":
+            self.topmost_timer.start(30000)
+
+        self.place_window()
+
+    def _begin_batch_update(self):
+        """Suppress paints + snapshot overlay as backup."""
+        self.setUpdatesEnabled(False)
+        snap = self.left_panel.grab()
+        self._sidebar_snap = QLabel(self.left_panel)
+        self._sidebar_snap.setPixmap(snap)
+        self._sidebar_snap.setGeometry(self.left_panel.rect())
+        self._sidebar_snap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._sidebar_snap.show()
+        self._sidebar_snap.raise_()
+
+    def _end_batch_update(self):
+        """Re-enable paints — naturally batched by Qt's backing store."""
+        if hasattr(self, "_sidebar_snap") and self._sidebar_snap is not None:
+            self._sidebar_snap.hide()
+            self._sidebar_snap.deleteLater()
+            self._sidebar_snap = None
+        self.setUpdatesEnabled(True)
+
+    def mark_dirty(self):
+        self.state.mark_dirty()
+
+    def _auto_save_tick(self):
+        if not getattr(self.state, "_db_dirty", False):
+            return
+        self.save_data_to_db()
+
+    def play_sound(self, name):
+        self.sound_manager.play(name)
+
+    def play_click_sound(self):
+        self.sound_manager.play_click()
+
+    def play_tick_sound(self):
+        self.sound_manager.play_tick()
+
+    def _deferred_silo_refresh(self):
+        """Called once after the window layout is computed to set correct silo count."""
+        if hasattr(self, "silos_widget") and self.silos_widget.height() > 0:
+            self._update_visible_silo_count()
+            self.refresh_temp_presets()
+        else:
+            # Layout not ready yet, try again
+            QTimer.singleShot(50, lambda: not sip.isdeleted(self) and self._deferred_silo_refresh())
+
+    def _update_visible_silo_count(self):
+        if hasattr(self, "silos_widget") and self.silos_widget.height() > 0:
+            # Estimate button height from the first visible button, fallback to 24*scale
+            estimate = 24
+            for btn in getattr(self, "silo_buttons", []):
+                if btn.isVisible():
+                    bh = btn.height()
+                    if bh > 0:
+                        estimate = bh
+                    break
+            spacing = 2
+            self._visible_silos = max(
+                1, (self.silos_widget.height() + spacing) // (estimate + spacing)
+            )
+        else:
+            self._visible_silos = 10
+
+    def setup_single_instance_server(self):
+        import tempfile
+        import uuid
+
+        self.ipc_token = str(uuid.uuid4())
+        token_file = os.path.join(tempfile.gettempdir(), "fastprompter_ipc.token")
+        try:
+            with open(token_file, "w") as f:
+                f.write(self.ipc_token)
+        except Exception as e:
+            print("Could not write IPC token", e)
+
+        self.server = QLocalServer()
+        self.server.removeServer(SERVER_NAME)
+        # print('About to listen!')  # debug
+        if not self.server.listen(SERVER_NAME):
+            # print('Listen failed:', self.server.serverError())  # debug
+            sys.exit(0)
+        # print('Listen succeeded!')  # debug
+        self.server.newConnection.connect(self.handle_command)
+
+    def handle_command(self):
+        sock = self.server.nextPendingConnection()
+        if sock.bytesAvailable() > 0 or sock.waitForReadyRead(500):
+            data = sock.readAll().data()
+            try:
+                data_str = data.decode("utf-8")
+                if data_str.startswith("TOKEN:"):
+                    parts = data_str.split("|", 1)
+                    if len(parts) == 2:
+                        recv_token = parts[0][6:]
+                        cmd = parts[1]
+                        if recv_token == getattr(self, "ipc_token", "") and cmd.strip() == "SHOW":
+                            self.show_window()
+                elif data_str.strip() == "SHOW":
+                    self.show_window()
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+        sock.disconnectFromServer()
+        sock.deleteLater()
+
+    # init_db removed, moved to FastPrompterState
+
+    def get_current_context_key(self):
+        if getattr(self, "editing_snippet", None):
+            cat, idx = self.editing_snippet
+            return f"snippet:{cat}:{idx}"
+        else:
+            return f"silo:{self.active_temp_slot}"
+
+    def save_data_to_db(self, force=False):
+        if hasattr(self, "text_area"):
+            cached = getattr(self, "_last_cached_text", None)
+            current_text = self.text_area.toPlainText() if cached is None else cached
+            self._last_cached_text = None
+        else:
+            current_text = self.data.get("last_text", "")
+        self._last_saved_text = current_text
+
+        if (
+            not getattr(self, "_suspend_cache", False)
+            and not getattr(self, "_initializing_ui", False)
+            and not getattr(self, "_suspend_temp_sync", False)
+            and not self.editing_snippet
+        ):
+            if 0 <= self.active_temp_slot < len(self.data["temp_presets"]):
+                self.data["temp_presets"][self.active_temp_slot] = current_text
+
+        self.data["window_locked"] = "True" if getattr(self, "is_locked", False) else "False"
+
+        ui_settings = {
+            "last_tab_idx": str(self.data["last_tab_idx"]),
+            "active_temp_slot": str(self.active_temp_slot),
+            "last_geometry": self.data.get("last_geometry", ""),
+            "font_size": str(self.font_spin.value())
+            if hasattr(self, "font_spin")
+            else str(self.data.get("font_size", 11)),
+            "preview_mode": self.preview_combo.currentText()
+            if hasattr(self, "preview_combo")
+            else self.data.get("preview_mode", "None"),
+            "paste_mode": self.btn_format.text()
+            if hasattr(self, "btn_format")
+            else self.data.get("paste_mode", "Plain"),
+            "tray_visible": str(self.cb_tray.isChecked())
+            if hasattr(self, "cb_tray")
+            else self.data.get("tray_visible", "True"),
+            "close_on_focus_loss": str(self.cb_focus.isChecked())
+            if hasattr(self, "cb_focus")
+            else self.data.get("close_on_focus_loss", "True"),
+            "ctrl_c_closes": str(self.cb_ctrl_c.isChecked())
+            if hasattr(self, "cb_ctrl_c")
+            else self.data.get("ctrl_c_closes", "True"),
+            "silo_last_edited": getattr(self, "silo_last_edited", {}),
+        }
+
+        self.state.save_data_to_db(current_text, ui_settings, force=force)
+
+    def init_ui(self):
+        flags = Qt.WindowType.Window
+        if self.data.get("normal_window", "False") != "True":
+            flags |= Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self.data.get("always_on_top", "True") == "True":
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.setWindowTitle("FastPrompter")
+        self.setMinimumSize(480, 320)
+
+        self.setMouseTracking(True)
+        self._initializing_ui, self._suspend_temp_sync = True, True
+
+        self._resizers = {
+            "left": EdgeResizer(self, "left"),
+            "right": EdgeResizer(self, "right"),
+            "top": EdgeResizer(self, "top"),
+            "bottom": EdgeResizer(self, "bottom"),
+            "topleft": EdgeResizer(self, "topleft"),
+            "topright": EdgeResizer(self, "topright"),
+            "bottomleft": EdgeResizer(self, "bottomleft"),
+            "bottomright": EdgeResizer(self, "bottomright"),
+        }
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        self.main_layout = QVBoxLayout(central)
+        self.main_layout.setContentsMargins(2, 2, 2, 2)
+        self.main_layout.setSpacing(2)
+
+        self.header_widget = QWidget()
+        self.header_layout = QHBoxLayout(self.header_widget)
+        self.header_layout.setContentsMargins(0, 0, 0, 0)
+        self.header_layout.setSpacing(2)
+
+        self.btn_sidebar_toggle = QPushButton("☰")
+        self.apply_button_size(self.btn_sidebar_toggle, 24, 24)
+        self.btn_sidebar_toggle.setToolTip(
+            "Toggle Sidebar (Alt+D)\nShow or hide the right/left sidebar containing snippets and silos."
+        )
+        self.btn_sidebar_toggle.clicked.connect(self.toggle_sidebar_visibility)
+        self.header_layout.addWidget(self.btn_sidebar_toggle)
+
+        self.tab_bar = QTabBar()
+        self.tab_bar.setExpanding(False)
+        self.tab_bar.setUsesScrollButtons(False)
+        for cat in self.data["cats_order"]:
+            self.tab_bar.addTab(cat)
+        self.tab_bar.currentChanged.connect(self.on_tab_changed)
+
+        self.btn_add_tab = QPushButton("+")
+        self.apply_button_size(self.btn_add_tab, 24)
+        self.btn_add_tab.setToolTip("Add Tab\nCreate a new custom category tab for snippets.")
+        self.btn_add_tab.clicked.connect(self.add_category)
+
+        self.btn_del_tab = QPushButton("-")
+        self.apply_button_size(self.btn_del_tab, 24)
+        self.btn_del_tab.setToolTip("Delete Tab\nRemove the currently active category tab.")
+        self.btn_del_tab.clicked.connect(self.del_category)
+
+        self.btn_new = QPushButton("NEW")
+        self.btn_new.setToolTip("NEW (Ctrl+N)")
+        self.apply_button_size(self.btn_new, 24)
+        self.btn_new.setMinimumWidth(80)
+        self.btn_new.clicked.connect(self.select_empty_silo)
+
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setToolTip("Save (Ctrl+S)")
+        self.apply_button_size(self.btn_save, 24)
+        self.btn_save.clicked.connect(self.save_snippet)
+
+        self.btn_home = QPushButton("Home")
+        self.btn_home.setToolTip("Home (Home)")
+        self.apply_button_size(self.btn_home, 24)
+        self.btn_home.clicked.connect(self.move_cursor_home)
+
+        self.btn_end = QPushButton("End")
+        self.btn_end.setToolTip("Jump to End\nMove cursor to the bottom of the document.")
+        self.apply_button_size(self.btn_end, 24)
+        self.btn_end.clicked.connect(self.move_cursor_end)
+
+        self.btn_add_line = QPushButton("Line")
+        self.btn_add_line.setToolTip("Insert Line\nInsert a horizontal markdown line (---).")
+        self.apply_button_size(self.btn_add_line, 24)
+        self.btn_add_line.clicked.connect(self.insert_add_line)
+
+        self.btn_bullet_toggle = QPushButton("-→•")
+        self.apply_button_size(self.btn_bullet_toggle, 24)
+
+        def _bullet_mousePress(event):
+            if (
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                curr = self.data.get("auto_bullet", "False") == "True"
+                self.data["auto_bullet"] = "False" if curr else "True"
+                self.mark_dirty()
+                self.play_click_sound()
+                state_str = "ON" if not curr else "OFF"
+                self.btn_bullet_toggle.setToolTip(f"Auto-Bullet: {state_str}")
+                event.accept()
+            else:
+                QPushButton.mousePressEvent(self.btn_bullet_toggle, event)
+
+        self.btn_bullet_toggle.mousePressEvent = _bullet_mousePress
+        self.btn_bullet_toggle.setToolTip(
+            "Auto-Bullet: " + ("ON" if self.data.get("auto_bullet", "False") == "True" else "OFF")
+        )
+
+        self.btn_bullet_toggle.clicked.connect(self.toggle_bullet_conversion)
+
+        self.btn_bold = QPushButton("B")
+        self.btn_bold.setToolTip("Bold (Ctrl+B)\nMake selected text bold.")
+        self.apply_button_size(self.btn_bold, 24, 24)
+        f = QFont(self.btn_bold.font()); f.setBold(True); self.btn_bold.setFont(f)
+        self.btn_bold.clicked.connect(lambda: self.apply_format("bold"))
+
+        self.btn_italic = QPushButton("I")
+        self.btn_italic.setToolTip("Italic (Ctrl+I)\nMake selected text italic.")
+        self.apply_button_size(self.btn_italic, 24, 24)
+        f = QFont(self.btn_italic.font()); f.setItalic(True); self.btn_italic.setFont(f)
+        self.btn_italic.clicked.connect(lambda: self.apply_format("italic"))
+
+        self.btn_under = QPushButton("U")
+        self.btn_under.setToolTip("Underline (Ctrl+U)\nMake selected text underlined.")
+        self.apply_button_size(self.btn_under, 24, 24)
+        f = QFont(self.btn_under.font()); f.setUnderline(True); self.btn_under.setFont(f)
+        self.btn_under.clicked.connect(lambda: self.apply_format("underline"))
+
+        self.btn_strike = QPushButton("S")
+        self.btn_strike.setToolTip("Strikethrough (Ctrl+T)\nCross out selected text.")
+        self.apply_button_size(self.btn_strike, 24, 24)
+        f = QFont(self.btn_strike.font()); f.setStrikeOut(True); self.btn_strike.setFont(f)
+        self.btn_strike.clicked.connect(lambda: self.apply_format("strike"))
+
+        self.btn_clear_fmt = QPushButton("Clear Fmt")
+        self.btn_clear_fmt.setToolTip("Clear Format\nRemove all explicit font styling from text.")
+        self.apply_button_size(self.btn_clear_fmt, 24)
+        self.btn_clear_fmt.clicked.connect(self.clear_formatting)
+
+        self.btn_clean_space = QPushButton("Clean")
+        self.apply_button_size(self.btn_clean_space, 24)
+        self.btn_clean_space.setToolTip("Clean excessive empty lines (keeps lines near '---')")
+        self.btn_clean_space.clicked.connect(self.clean_excessive_newlines)
+
+        self.btn_settings_toggle = QPushButton("⚙")
+        self.apply_button_size(self.btn_settings_toggle, 24, 24)
+        self.btn_settings_toggle.setToolTip(
+            "Settings\nConfigure hotkeys, theme, fonts, and UI scaling."
+        )
+        self.btn_settings_toggle.clicked.connect(self.toggle_mini_settings)
+
+        self.btn_help = QLabel(" ❓")
+        self.btn_help.setToolTip(
+            "<b>FastPrompter Tips:</b><br>"
+            "• <i>Global Hotkey</i>: Show/Hide UI from anywhere.<br>"
+            "• <b>Ctrl+D</b>: Zen/Focus Mode.<br>"
+            "• <b>Ctrl+F</b>: Find.<br>"
+            "• <b>Ctrl+H</b>: Replace.<br>"
+            "• <b>Ctrl+S</b>: Save Snippet.<br>"
+            "• <b>Ctrl+Shift+S</b>: Export Silo to file.<br>"
+            "• <b>F1..F10</b>: Paste Snippet."
+        )
+
+        self.btn_copy = QPushButton("Copy")
+        self.btn_copy.setToolTip("Copy all text (Ctrl+C)\nRight-click: Copy + Close FastPrompter")
+        self.apply_button_size(self.btn_copy, 24)
+        self.btn_copy.clicked.connect(self.copy_context_to_clipboard)
+        self.btn_copy.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_copy.customContextMenuRequested.connect(self.copy_context_and_close)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setToolTip("Clear (Ctrl+Shift+C)")
+        self.apply_button_size(self.btn_clear, 24)
+        self.btn_clear.clicked.connect(self.clear_text)
+
+        self.btn_format = QPushButton("Plain")
+        self.btn_format.setToolTip(
+            "View Mode Toggle\nSwitch between Plain Text (editing) and Formatted Preview (Markdown rendering)."
+        )
+        self.btn_format.setCheckable(True)
+        saved_mode = self.data.get("paste_mode", "Plain")
+        self.btn_format.setChecked(saved_mode == "Plain")
+        self.btn_format.setText(saved_mode)
+        self.apply_button_size(self.btn_format, 24)
+        self.btn_format.toggled.connect(self.toggle_paste_mode)
+
+        # Navigation
+        self.header_layout.addWidget(self.tab_bar)
+        self.header_layout.addWidget(self.btn_add_tab)
+        self.header_layout.addWidget(self.btn_del_tab)
+        self.header_layout.addWidget(self.btn_new)
+        self.header_layout.addWidget(self.btn_save)
+
+        # Formatting and editing
+        self.header_layout.addStretch(1)
+        self.header_layout.addWidget(self.btn_bold)
+        self.header_layout.addWidget(self.btn_italic)
+        self.header_layout.addWidget(self.btn_under)
+        self.header_layout.addWidget(self.btn_strike)
+        self.header_layout.addWidget(self.btn_clear_fmt)
+        self.header_layout.addWidget(self.btn_add_line)
+        self.header_layout.addWidget(self.btn_bullet_toggle)
+        self.header_layout.addWidget(self.btn_clean_space)
+        self.header_layout.addWidget(self.btn_copy)
+        self.header_layout.addWidget(self.btn_clear)
+        self.header_layout.addWidget(self.btn_format)
+
+        # Cursor nav and settings
+        self.header_layout.addStretch(1)
+        self.lbl_line_count = QLabel("")
+        self.lbl_line_count.setToolTip("Line count of the open silo/snippet")
+        self.lbl_line_count.setStyleSheet("padding: 0 4px; font-weight: bold;")
+        self.header_layout.addWidget(self.lbl_line_count)
+        self.header_layout.addWidget(self.btn_home)
+        self.header_layout.addWidget(self.btn_end)
+        self.header_layout.addWidget(self.btn_settings_toggle)
+        self.header_layout.addWidget(self.btn_help)
+        self.main_layout.addWidget(self.header_widget)
+
+        self.mini_settings_frame = QFrame(self)
+        self.mini_settings_frame.setVisible(False)
+
+        self.font_combo = QComboBox()
+        self.font_combo.addItems(
+            [
+                "Verdana",
+                "Tahoma",
+                "Consolas",
+                "Calibri",
+                "Times New Roman",
+                "Arial",
+                "Segoe UI",
+                "Courier New",
+            ]
+        )
+        saved_font = self.data.get("font_family", "Verdana")
+        idx = self.font_combo.findText(saved_font)
+        if idx >= 0:
+            self.font_combo.setCurrentIndex(idx)
+        self.font_combo.currentTextChanged.connect(self.change_font_family)
+
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(6, 48)
+        try:
+            self.font_spin.setValue(int(self.data.get("font_size", "11")))
+        except Exception:
+            self.font_spin.setValue(11)
+        self.font_spin.valueChanged.connect(self.change_font_size)
+
+        self.preview_combo = QComboBox()
+        self.preview_combo.addItems(["Source View", "Live Preview", "Reading"])
+        self.preview_combo.setToolTip(
+            "Source View: Plain text editor\n"
+            "Live Preview: Editor with live markdown highlights (default)\n"
+            "Reading: Read-only rendered markdown view"
+        )
+        # Map old saved values to new
+        _view_map = {"None": "Source View", "Raw": "Source View", "Markdown": "Reading"}
+        saved_preview = self.data.get("preview_mode", "Live Preview")
+        saved_preview = _view_map.get(saved_preview, saved_preview)  # migrate old values
+        idx = self.preview_combo.findText(saved_preview)
+        if idx < 0:
+            idx = 1  # default to Live Preview
+        self.preview_combo.setCurrentIndex(idx)
+        self.preview_combo.currentIndexChanged.connect(self.change_preview_mode)
+
+        self.cb_theme = QComboBox()
+        self.cb_theme.addItems(
+            [
+                "Default",
+                "Golden Vintage",
+                "Golden Default",
+                "Vintage Dark",
+                "Vintage Classic",
+                "Dark 2 (OLED)",
+                "Custom",
+            ]
+        )
+        saved_theme = self.data.get("theme", "Default")
+        idx = self.cb_theme.findText(saved_theme)
+        if idx >= 0:
+            self.cb_theme.setCurrentIndex(idx)
+        self.cb_theme.currentTextChanged.connect(self.change_theme)
+
+        # Removed broken preset_combo — it didn't work
+
+        def make_action_checkbox(text, callback):
+            cb = QCheckBox(text)
+
+            def on_toggled(checked):
+                if checked:
+                    self.play_tick_sound()
+                    callback()
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
+
+            cb.toggled.connect(on_toggled)
+            return cb
+
+        self.btn_hotkeys = make_action_checkbox("Keys", self.open_hotkey_settings)
+        self.btn_hotkeys.setToolTip("Configure Global Hotkeys (Settings Cog)")
+        self.btn_colors = make_action_checkbox("RGB", self.open_color_settings)
+        self.btn_colors.setToolTip("Custom Theme Colors (Color Palette)")
+        self.btn_backup = make_action_checkbox("BkUp", self.backup_db)
+        self.btn_restore = make_action_checkbox("Rstr", self.restore_db)
+
+        try:
+            current_b_scale = int(float(self.data.get("button_scale", "1.0")) * 100)
+        except Exception:
+            current_b_scale = 100
+        self.btn_button_scale = make_action_checkbox(
+            f"Btn Scale: {current_b_scale}%", self.cycle_button_scale
+        )
+
+        # Load custom font button
+        self.btn_load_font = QPushButton("+ Font")
+        self.btn_load_font.setFixedWidth(52)
+        self.btn_load_font.setToolTip("Load a custom .ttf/.otf font file")
+        self.btn_load_font.clicked.connect(self.load_custom_font)
+
+        self.btn_clear_fonts = QPushButton("× Fonts")
+        self.btn_clear_fonts.setFixedWidth(54)
+        self.btn_clear_fonts.setToolTip("Clear all custom fonts from combo (reset to defaults)")
+        self.btn_clear_fonts.clicked.connect(self.clear_custom_fonts)
+
+        # Volume control
+        self.spin_volume = QSpinBox()
+        self.spin_volume.setRange(1, 10)
+        try:
+            self.spin_volume.setValue(int(self.data.get("sound_volume", "5")))
+        except Exception:
+            self.spin_volume.setValue(5)
+        self.spin_volume.setFixedWidth(42)
+        self.spin_volume.setToolTip("Click sound volume (1-10)")
+        self.spin_volume.valueChanged.connect(
+            lambda v: (self.data.update({"sound_volume": str(v)}), self.mark_dirty())
+        )
+
+        # --- Settings panel: hidden by default, toggled by the gear button. ---
+        # Top row: appearance & actions. Below: toggles grouped by purpose.
+        appearance_row = QHBoxLayout()
+        appearance_row.setContentsMargins(0, 0, 0, 0)
+        appearance_row.setSpacing(4)
+        appearance_row.addWidget(QLabel("Font:"))
+        appearance_row.addWidget(self.font_combo)
+        appearance_row.addWidget(self.font_spin)
+        appearance_row.addWidget(self.btn_load_font)
+        appearance_row.addWidget(self.btn_clear_fonts)
+        appearance_row.addSpacing(8)
+        appearance_row.addWidget(QLabel("Theme:"))
+        appearance_row.addWidget(self.cb_theme)
+        appearance_row.addWidget(self.btn_colors)
+        appearance_row.addSpacing(8)
+        appearance_row.addWidget(QLabel("View:"))
+        appearance_row.addWidget(self.preview_combo)
+        appearance_row.addWidget(self.btn_button_scale)
+        appearance_row.addStretch(1)
+        appearance_row.addWidget(self.btn_hotkeys)
+        appearance_row.addWidget(self.btn_backup)
+        appearance_row.addWidget(self.btn_restore)
+
+        def create_footer_cb(text, tooltip, checked, callback):
+            cb = QCheckBox(text)
+            cb.setToolTip(tooltip)
+            cb.setChecked(checked)
+            if callback:
+                cb.toggled.connect(lambda _: self.play_tick_sound())
+                cb.toggled.connect(callback)
+            return cb
+
+        self.cb_top = create_footer_cb(
+            "Always on Top",
+            "Keep the window above all others",
+            self.data.get("always_on_top", "True") == "True",
+            self.toggle_aot,
+        )
+        self.cb_lock_window = create_footer_cb(
+            "Lock Window",
+            "Freeze the window's position and size",
+            self.data.get("window_locked", "False") == "True",
+            self.set_lock_state,
+        )
+        self.cb_normal_window = create_footer_cb(
+            "Normal Window",
+            "Use a standard OS window frame and taskbar entry",
+            self.data.get("normal_window", "False") == "True",
+            self.apply_window_flags,
+        )
+        self.cb_tray = create_footer_cb(
+            "Tray Icon",
+            "Keep an icon in the system tray",
+            self.data.get("tray_visible", "True") == "True",
+            self.on_tray_toggled,
+        )
+        self.cb_sidebar = create_footer_cb(
+            "Sidebar Right",
+            "Move the snippet/silo sidebar to the right side",
+            self.data.get("sidebar_right", "False") == "True",
+            self.toggle_sidebar_position,
+        )
+        self.cb_focus = create_footer_cb(
+            "Hide on Click-Out",
+            "Hide the window when you click outside of it",
+            self.data.get("close_on_focus_loss", "True") == "True",
+            self.mark_dirty,
+        )
+        self.cb_ctrl_c = create_footer_cb(
+            "Ctrl+C Hides",
+            "Copying with Ctrl+C also hides the window\n(copy & get back to work in one stroke)",
+            self.data.get("ctrl_c_closes", "True") == "True",
+            self.mark_dirty,
+        )
+        self.cb_lock_cursor = create_footer_cb(
+            "Open at Cursor",
+            "The hotkey opens the window at your mouse cursor",
+            self.data.get("lock_to_cursor", "False") == "True",
+            self.on_lock_cursor_toggled,
+        )
+        self.cb_silo_home = create_footer_cb(
+            "Silos at Start",
+            "Place the cursor at the top of a silo when opening it",
+            self.data.get("silo_home", "False") == "True",
+            self.on_silo_home_toggled,
+        )
+        self.cb_portable_backup = create_footer_cb(
+            "Auto Backup (.md)",
+            "Mirror silos & snippets as Markdown files to Documents\\.fastprompter\\",
+            self.data.get("portable_backup_enabled", "True") == "True",
+            lambda checked: (
+                self.data.update({"portable_backup_enabled": "True" if checked else "False"})
+                or self.mark_dirty()
+            ),
+        )
+        self.cb_wrap = create_footer_cb(
+            "Word Wrap",
+            "Wrap long lines instead of scrolling horizontally",
+            self.data.get("word_wrap", "True") == "True",
+            self.on_wrap_toggled,
+        )
+        self.cb_line_numbers = create_footer_cb(
+            "Line Numbers",
+            "Show a line-number gutter\n(click it to place colored margin marks)",
+            self.data.get("show_line_numbers", "False") == "True",
+            self.on_line_numbers_toggled,
+        )
+        self.cb_zebra = create_footer_cb(
+            "Zebra Stripes",
+            "Lightly shade every other line for readability",
+            self.data.get("zebra_lines", "False") == "True",
+            lambda checked: (
+                self.data.update({"zebra_lines": "True" if checked else "False"})
+                or self.text_area.viewport().update()
+                or self.mark_dirty()
+            ),
+        )
+        self.cb_hide_shortkeys = create_footer_cb(
+            "Hide Key Hints",
+            "Hide the F1-F10 shortcut labels on snippet buttons",
+            self.data.get("hide_shortkeys", "False") == "True",
+            self.on_hide_shortkeys_toggled,
+        )
+        self.cb_sound = create_footer_cb(
+            "UI Sounds",
+            "Play click sounds for buttons and actions",
+            self.data.get("sound_ui", "False") == "True",
+            self.on_sound_toggled,
+        )
+        self.cb_typewriter = create_footer_cb(
+            "Typewriter",
+            "Play a typewriter tick for every typed character",
+            self.data.get("sound_typewriter", "False") == "True",
+            self.on_typewriter_toggled,
+        )
+
+        vol_row = QHBoxLayout()
+        vol_row.setContentsMargins(0, 0, 0, 0)
+        vol_row.setSpacing(4)
+        vol_row.addWidget(QLabel("Volume:"))
+        vol_row.addWidget(self.spin_volume)
+        vol_row.addStretch(1)
+
+        def _settings_group(title, items):
+            col = QVBoxLayout()
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(1)
+            header = QLabel(title)
+            header.setStyleSheet("font-weight: bold; padding: 0 0 1px 0;")
+            col.addWidget(header)
+            for item in items:
+                if isinstance(item, QHBoxLayout):
+                    col.addLayout(item)
+                else:
+                    col.addWidget(item)
+            col.addStretch(1)
+            return col
+
+        def _vline():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.VLine)
+            line.setFrameShadow(QFrame.Shadow.Sunken)
+            return line
+
+        groups_row = QHBoxLayout()
+        groups_row.setContentsMargins(2, 0, 2, 0)
+        groups_row.setSpacing(8)
+        groups_row.addLayout(_settings_group("Window", [
+            self.cb_top, self.cb_lock_window, self.cb_normal_window,
+            self.cb_tray, self.cb_sidebar,
+        ]))
+        groups_row.addWidget(_vline())
+        groups_row.addLayout(_settings_group("Behavior", [
+            self.cb_focus, self.cb_ctrl_c, self.cb_lock_cursor,
+            self.cb_silo_home, self.cb_portable_backup,
+        ]))
+        groups_row.addWidget(_vline())
+        groups_row.addLayout(_settings_group("Editor", [
+            self.cb_wrap, self.cb_line_numbers, self.cb_zebra,
+            self.cb_hide_shortkeys,
+        ]))
+        groups_row.addWidget(_vline())
+        groups_row.addLayout(_settings_group("Sound", [
+            self.cb_sound, self.cb_typewriter, vol_row,
+        ]))
+        groups_row.addStretch(1)
+
+        hline = QFrame()
+        hline.setFrameShape(QFrame.Shape.HLine)
+        hline.setFrameShadow(QFrame.Shadow.Sunken)
+
+        v_layout = QVBoxLayout(self.mini_settings_frame)
+        v_layout.setContentsMargins(4, 2, 4, 3)
+        v_layout.setSpacing(3)
+        v_layout.addLayout(appearance_row)
+        v_layout.addWidget(hline)
+        v_layout.addLayout(groups_row)
+
+        # Hidden by default — the gear button reveals it
+        self.mini_settings_frame.setVisible(self.data.get("hide_extra", "True") != "True")
+
+        self.main_layout.addWidget(self.mini_settings_frame)
+        # self.main_layout.addWidget(self.left_panel)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(True)
+        self.main_layout.addWidget(self.splitter)
+        self.splitter.setOpaqueResize(True)
+        self.splitter.setHandleWidth(1)
+
+        self.left_panel = QWidget()
+        self.left_panel_layout = QVBoxLayout(self.left_panel)
+        self.left_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_panel_layout.setSpacing(0)
+
+        self.snippets_section = QWidget()
+        self.snippets_section_layout = QVBoxLayout(self.snippets_section)
+        self.snippets_section_layout.setContentsMargins(0, 0, 0, 0)
+        self.snippets_section_layout.setSpacing(1)
+
+        snip_header = QHBoxLayout()
+        snip_header.setContentsMargins(0, 0, 0, 0)
+        self.snip_label = QLabel("Snippets")
+        snip_header.addWidget(self.snip_label)
+        snip_header.addStretch()
+
+        self.btn_toggle_search = QPushButton("⌕")
+        self.apply_button_size(self.btn_toggle_search, 20, 20)
+        self.btn_toggle_search.setCheckable(True)
+        snip_header.addWidget(self.btn_toggle_search)
+
+        self.btn_arc_snip = QPushButton("📥")
+        self.apply_button_size(self.btn_arc_snip, 20, 20)
+        self.btn_arc_snip.setToolTip("Archive Active Snippet or Silo")
+        self.btn_arc_snip.clicked.connect(self.archive_active_item)
+        snip_header.addWidget(self.btn_arc_snip)
+
+        self.btn_toggle_archive = QPushButton("📦")
+        self.apply_button_size(self.btn_toggle_archive, 20, 20)
+        self.btn_toggle_archive.setToolTip("Toggle Archives")
+        self.btn_toggle_archive.setCheckable(True)
+        snip_header.addWidget(self.btn_toggle_archive)
+
+        self.btn_add_snip = QPushButton("+")
+        self.apply_button_size(self.btn_add_snip, 20, 20)
+        self.btn_add_snip.clicked.connect(self.save_snippet)
+        snip_header.addWidget(self.btn_add_snip)
+
+        self.btn_del_snip = QPushButton("-")
+        self.apply_button_size(self.btn_del_snip, 20, 20)
+        self.btn_del_snip.clicked.connect(self.del_last_snippet)
+        snip_header.addWidget(self.btn_del_snip)
+
+        self.snippets_section_layout.addLayout(snip_header)
+
+        self.search_bar = QLineEdit()
+        self.search_bar.setToolTip("Search snippets")
+        self.search_bar.setPlaceholderText("Search...")
+        self.search_bar.setFixedHeight(20)
+
+        saved_search_visible = self.data.get("search_visible", "False") == "True"
+        self.btn_toggle_search.setChecked(saved_search_visible)
+        self.search_bar.setVisible(saved_search_visible)
+        self.btn_toggle_search.toggled.connect(self.on_search_toggle)
+
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.setInterval(150)
+        self._search_debounce_timer.timeout.connect(self.refresh_snippets_panel)
+        self.search_bar.textChanged.connect(self._search_debounce_timer.start)
+        self.snippets_section_layout.addWidget(self.search_bar)
+
+        self.btn_page_up = QPushButton("▲")
+        self.btn_page_up.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.btn_page_up.setMinimumWidth(10)
+        self.apply_button_size(self.btn_page_up, 16)
+        self.btn_page_up.clicked.connect(lambda: self.change_page(-1))
+        self.snippets_section_layout.addWidget(self.btn_page_up)
+
+        self.snippets_widget = DropVerticalWidget(self)
+        self.snippet_buttons = []
+        for _ in range(10):
+            w = SnippetWidget(self)
+            w.hide()
+            self.snippets_widget.layout.addWidget(w)
+            self.snippet_buttons.append(w)
+        self.snippets_section_layout.addWidget(self.snippets_widget)
+
+        self.btn_page_down = QPushButton("▼")
+        self.btn_page_down.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.btn_page_down.setMinimumWidth(10)
+        self.apply_button_size(self.btn_page_down, 16)
+        self.btn_page_down.clicked.connect(lambda: self.change_page(1))
+        self.snippets_section_layout.addWidget(self.btn_page_down)
+        self.left_panel_layout.addWidget(self.snippets_section, 0)
+
+        self.archive_section = QWidget()
+        self.archive_section.setObjectName("ArchiveSection")
+        self.archive_section_layout = QVBoxLayout(self.archive_section)
+        self.archive_section_layout.setContentsMargins(0, 0, 0, 0)
+        self.archive_section_layout.setSpacing(1)
+
+        arc_header = QHBoxLayout()
+        arc_header.setContentsMargins(0, 0, 0, 0)
+        self.arc_label = QLabel("Archive")
+        arc_header.addWidget(self.arc_label)
+        arc_header.addStretch()
+        self.archive_section_layout.addLayout(arc_header)
+
+        self.btn_arc_page_up = QPushButton("▲")
+        self.apply_button_size(self.btn_arc_page_up, 16)
+        self.btn_arc_page_up.clicked.connect(lambda: self.change_arc_page(-1))
+        self.archive_section_layout.addWidget(self.btn_arc_page_up)
+
+        self.archive_widget = SiloDropWidget(self, is_archive=True)
+        self.archive_buttons = []
+        for _ in range(50):
+            btn = DraggableSiloButton(self, is_archive=True)
+            btn.setMinimumHeight(14)
+            btn.hide()
+            self.archive_widget.layout.addWidget(btn)
+            self.archive_buttons.append(btn)
+        self.archive_section_layout.addWidget(self.archive_widget)
+
+        self.btn_arc_page_down = QPushButton("▼")
+        self.apply_button_size(self.btn_arc_page_down, 16)
+        self.btn_arc_page_down.clicked.connect(lambda: self.change_arc_page(1))
+        self.archive_section_layout.addWidget(self.btn_arc_page_down)
+
+        saved_arc_visible = self.data.get("archive_visible", "False") == "True"
+        self.btn_toggle_archive.setChecked(saved_arc_visible)
+        self.archive_section.setVisible(saved_arc_visible)
+        self.btn_toggle_archive.toggled.connect(self.on_archive_toggle)
+
+        self.silos_section = QWidget()
+        self.silos_section_layout = QVBoxLayout(self.silos_section)
+        self.silos_section_layout.setContentsMargins(0, 0, 0, 0)
+        self.silos_section_layout.setSpacing(1)
+
+        self.btn_silo_up = QPushButton("▲")
+        self.btn_silo_up.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.btn_silo_up.setMinimumWidth(10)
+        self.apply_button_size(self.btn_silo_up, 16)
+        self.btn_silo_up.clicked.connect(lambda: self.change_silo_page(-1))
+        self.silos_section_layout.addWidget(self.btn_silo_up)
+
+        self.silos_widget = SiloDropWidget(self)
+        self.silo_buttons = []
+        # Create enough silo buttons - _update_visible_silo_count will adjust
+        for _ in range(50):
+            btn = DraggableSiloButton(self)
+            btn.setMinimumHeight(14)
+            btn.hide()
+            self.silos_widget.layout.addWidget(btn)
+            self.silo_buttons.append(btn)
+        self.silos_section_layout.addWidget(self.silos_widget)
+
+        self.btn_silo_down = QPushButton("▼")
+        self.btn_silo_down.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.btn_silo_down.setMinimumWidth(10)
+        self.apply_button_size(self.btn_silo_down, 16)
+        self.btn_silo_down.clicked.connect(lambda: self.change_silo_page(1))
+        self.silos_section_layout.addWidget(self.btn_silo_down)
+        self.left_panel_layout.addWidget(self.silos_section, 1)
+
+        # Mouse-wheel paging over the sidebar sections and tabs;
+        # Ctrl+wheel walks the silo selection one by one.
+        WheelPager(self.silos_section, self.change_silo_page, ctrl_callback=self.navigate_silo)
+        WheelPager(self.archive_section, self.change_arc_page, ctrl_callback=self.navigate_silo)
+        WheelPager(self.snippets_section, self.change_page)
+        WheelPager(self.tab_bar, self._wheel_switch_tab)
+        wheel_hint = (
+            "\nTip: mouse wheel over the list scrolls pages;"
+            "\nCtrl+wheel selects the previous/next silo."
+        )
+        self.btn_silo_up.setToolTip("Previous silo page" + wheel_hint)
+        self.btn_silo_down.setToolTip("Next silo page" + wheel_hint)
+        self.btn_page_up.setToolTip("Previous snippet page" + wheel_hint)
+        self.btn_page_down.setToolTip("Next snippet page" + wheel_hint)
+        self.btn_arc_page_up.setToolTip("Previous archive page" + wheel_hint)
+        self.btn_arc_page_down.setToolTip("Next archive page" + wheel_hint)
+        self.tab_bar.setToolTip("Projects — mouse wheel switches tabs")
+
+        self.archive_section.setParent(self.left_panel)
+        self.archive_section.raise_()
+
+        self.silos_section.setVisible(False)
+        self.center_panel = QWidget()
+        self.center_layout = QVBoxLayout(self.center_panel)
+        self.center_layout.setContentsMargins(0, 0, 0, 0)
+        self.center_layout.setSpacing(2)
+
+        self.search_frame = QFrame()
+        self.search_frame.setObjectName("SearchFrame")
+        self.search_frame.setVisible(False)
+        search_layout = QHBoxLayout(self.search_frame)
+        search_layout.setContentsMargins(4, 2, 4, 2)
+        search_layout.setSpacing(6)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Find...")
+        self.search_input.returnPressed.connect(self.find_next)
+        search_layout.addWidget(self.search_input)
+
+        self.btn_find_prev = QPushButton("◄")
+        self.btn_find_prev.clicked.connect(self.find_prev)
+        self.apply_button_size(self.btn_find_prev, 24, 24)
+        search_layout.addWidget(self.btn_find_prev)
+
+        self.btn_find_next = QPushButton("►")
+        self.btn_find_next.clicked.connect(self.find_next)
+        self.apply_button_size(self.btn_find_next, 24, 24)
+        search_layout.addWidget(self.btn_find_next)
+
+        self.replace_input = QLineEdit()
+        self.replace_input.setPlaceholderText("Replace with...")
+        search_layout.addWidget(self.replace_input)
+
+        self.btn_replace = QPushButton("Rpl")
+        self.btn_replace.clicked.connect(self.replace_text)
+        self.apply_button_size(self.btn_replace, 24)
+        search_layout.addWidget(self.btn_replace)
+
+        self.btn_replace_all = QPushButton("Rpl All")
+        self.btn_replace_all.clicked.connect(self.replace_all)
+        self.apply_button_size(self.btn_replace_all, 24)
+        search_layout.addWidget(self.btn_replace_all)
+
+        self.btn_close_search = QPushButton("✕")
+        self.apply_button_size(self.btn_close_search, 24, 24)
+        self.btn_close_search.clicked.connect(self.close_search)
+        search_layout.addWidget(self.btn_close_search)
+
+        self.center_layout.addWidget(self.search_frame)
+
+        self.text_area = VaultTextEdit(self)
+
+        self.text_area.installEventFilter(self)
+        self.setMouseTracking(True)
+        self.highlighter = MarkdownHighlighter(base_font_size=11)
+        self.highlighter.setDocument(self.text_area.document())
+        self.highlighter.set_skip_large(True)
+        self.apply_wrap_mode()
+        self.text_area.setPlaceholderText("Think deeply.")
+        self.text_area.setWordWrapMode(
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+        )  # Socratic: Smart visual wrap without corrupting text
+        self.text_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Use a debounce timer to avoid text input stutter from cache sync
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setSingleShot(True)
+        self._cache_timer.setInterval(800)
+        self._cache_timer.timeout.connect(self._on_cache_timer)
+        self.text_area.textChanged.connect(self._on_text_changed)
+
+        self._LARGE_DOC_THRESHOLD = 500000  # chars (raised 100x for large file support)
+        self._cache_timer_interval = 800
+
+        try:
+            font_size = int(self.data.get("font_size", 11))
+        except Exception:
+            font_size = 11
+        font = QFont(self.data.get("font_family", "Verdana"), font_size)
+        font.setStyleStrategy(
+            QFont.StyleStrategy.NoAntialias | QFont.StyleStrategy.NoSubpixelAntialias
+        )
+        self.text_area.setFont(font)
+
+        self.silo_docs = []
+        for _, text in enumerate(self.data.get("temp_presets", [])):
+            doc = QTextDocument()
+            doc.setDefaultFont(font)
+            self._set_plain_text_clean(doc, text)
+            self.silo_docs.append(doc)
+
+        self.archive_docs = []
+        for text in self.data.get("archive_temp_presets", []):
+            doc = QTextDocument()
+            doc.setDefaultFont(font)
+            self._set_plain_text_clean(doc, text)
+            self.archive_docs.append(doc)
+
+        self.snippet_docs = {}
+
+        self.center_layout.addWidget(self.text_area, 1)
+
+        self.preview_area = QTextEdit(readOnly=True)
+        self.preview_area.setVisible(False)
+        self.preview_area.setFont(font)
+        # No fixed height — in Reading mode it should fill the whole center
+        self.center_layout.addWidget(self.preview_area, 1)
+
+        self.main_layout.addWidget(self.splitter, 1)
+
+        # Use custom EdgeResizer instead of QSizeGrip
+
+        # Edge resizers
+
+        self.apply_sidebar_position()
+
+        safe_idx = max(0, min(self.data.get("last_tab_idx", 0), self.tab_bar.count() - 1))
+        if self.tab_bar.count() > 0:
+            self.tab_bar.setCurrentIndex(safe_idx)
+
+        self._trim_archive()
+        self.refresh_snippets_panel()
+        self.refresh_temp_presets()
+        QTimer.singleShot(0, lambda: not sip.isdeleted(self) and self._deferred_silo_refresh())
+        self.change_preview_mode(self.preview_combo.currentIndex())
+        self.on_tray_toggled(self.cb_tray.isChecked())
+        self.set_lock_state(self.cb_lock_window.isChecked())
+        self.apply_scaled_ui()
+        self.apply_font()
+
+        self.splitter.splitterMoved.connect(self.on_splitter_moved)
+
+        self._silo_resize_debounce_timer = QTimer(self)
+        self._silo_resize_debounce_timer.setSingleShot(True)
+        self._silo_resize_debounce_timer.setInterval(100)
+        self._silo_resize_debounce_timer.timeout.connect(self.refresh_temp_presets)
+
+        self.silos_widget.installEventFilter(self)
+        self.left_panel.installEventFilter(self)
+
+    def change_profile(self, idx):
+        self.commit_current_text()
+        self.save_data_to_db(force=True)
+        self.data_undo_stack = []
+        self.data_redo_stack = []
+        self.state.switch_profile(idx + 1)
+        self.data = self.state.data
+
+        # Rebuild document caches for the new profile
+        from PyQt6.QtGui import QTextDocument
+
+        font = self.text_area.font()
+        self.silo_docs = []
+        for text in self.data.get("temp_presets", []):
+            doc = QTextDocument()
+            doc.setDefaultFont(font)
+            self._set_plain_text_clean(doc, text)
+            self.silo_docs.append(doc)
+        self.archive_docs = []
+        for text in self.data.get("archive_temp_presets", []):
+            doc = QTextDocument()
+            doc.setDefaultFont(font)
+            self._set_plain_text_clean(doc, text)
+            self.archive_docs.append(doc)
+        self.snippet_docs.clear()
+
+        # Apply ui changes
+        self.apply_theme()
+
+        # Re-populate UI
+        self.silo_page = 0
+        self.arc_silo_page = 0
+        self.btn_toggle_archive.setChecked(False)
+        self.refresh_temp_presets()
+        self.build_categories()
+
+        # Switch to first silo
+        try:
+            slot_val = int(self.data.get("active_temp_slot", 0))
+        except Exception:
+            slot_val = 0
+        self.active_temp_slot = max(0, min(slot_val, len(self.data["temp_presets"]) - 1))
+        self._switch_to_slot(self.active_temp_slot, initial=True)
+
+        # Switch to Text category
+        text_idx = 0
+        for i, c in enumerate(self.data["cats_order"]):
+            if c == "Text":
+                text_idx = i
+                break
+        self.tab_bar.setCurrentIndex(text_idx)
+        self.on_tab_changed(text_idx)
+
+    def insert_timestamp_at_end(self):
+        cursor = self.text_area.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        ts = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prefix = " " if cursor.block().text().strip() else ""
+        cursor.insertText(f"{prefix}{ts}")
+        self.text_area.setTextCursor(cursor)
+        self.text_area.ensureCursorVisible()
+        self.text_area.setFocus()
+        self.mark_dirty()
+
+    def apply_header_timestamp(self):
+        """Ctrl+E: Apply header (#), bold, underline, and append timestamp at end of current line."""
+        cursor = self.text_area.textCursor()
+        cursor.beginEditBlock()
+
+        pos_in_block = cursor.positionInBlock()
+        block = cursor.block()
+
+        # Select entire line
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        sel = cursor.selectedText()
+
+        # Add # header prefix if not already present
+        has_hdr = sel.startswith("# ")
+        if not has_hdr:
+            new_text = f"# {sel}"
+            offset = 2
+        else:
+            new_text = sel
+            offset = 0
+
+        cursor.insertText(new_text)
+
+        # Apply bold + underline formatting
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        fmt = cursor.charFormat()
+        fmt.setFontWeight(QFont.Weight.Bold)
+        fmt.setFontUnderline(True)
+        cursor.mergeCharFormat(fmt)
+
+        # Now append timestamp at end of line
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        ts = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.insertText(f" {ts}")
+
+        cursor.endEditBlock()
+
+        # Position cursor after the header prefix
+        new_pos_in_block = max(0, pos_in_block + offset)
+        new_cursor = self.text_area.textCursor()
+        new_cursor.setPosition(block.position() + new_pos_in_block)
+        self.text_area.setTextCursor(new_cursor)
+
+        self.text_area.setFocus()
+        self.mark_dirty()
+
+    def on_splitter_moved(self, pos, index):
+        self.mark_dirty()
+
+    def swap_temp_slots(self, idx1, idx2, is_archive=False):
+        if idx1 == idx2:
+            return
+        if not getattr(self, "editing_snippet", None):
+            target = self.data[
+                "archive_temp_presets"
+                if getattr(self, "active_is_archive", False)
+                else "temp_presets"
+            ]
+            slot = getattr(self, "active_temp_slot", 0)
+            if 0 <= slot < len(target):
+                target[slot] = self.text_area.toPlainText()
+        self.add_data_undo_state("Swap temp slots")
+        temps = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        docs = self.archive_docs if is_archive else self.silo_docs
+        if not (0 <= idx1 < len(temps) and 0 <= idx2 < len(temps)):
+            return
+
+        from PyQt6.QtGui import QTextDocument
+
+        while len(docs) <= max(idx1, idx2):
+            d = QTextDocument()
+            d.setDefaultFont(self.text_area.font())
+            if len(docs) < len(temps):
+                d.setPlainText(temps[len(docs)])
+            docs.append(d)
+
+        self._suspend_cache = True
+        temps[idx1], temps[idx2] = temps[idx2], temps[idx1]
+        docs[idx1], docs[idx2] = docs[idx2], docs[idx1]
+
+        if getattr(self, "active_is_archive", False) == is_archive:
+            if getattr(self, "active_temp_slot", -1) == idx1:
+                self.active_temp_slot = idx2
+            elif getattr(self, "active_temp_slot", -1) == idx2:
+                self.active_temp_slot = idx1
+        if not is_archive:
+            self._remap_silo_indices(lambda i: idx2 if i == idx1 else idx1 if i == idx2 else i)
+        self._suspend_cache = False
+        self.mark_dirty()
+        self.refresh_temp_presets()
+        if is_archive:
+            self.refresh_archive_panel()
+
+    def _remap_silo_indices(self, remap):
+        """Apply an index remap function to slot-index-keyed silo state (pins, last-edited)."""
+        self.silo_last_edited = {remap(k): v for k, v in self.silo_last_edited.items()}
+        pinned = self.data.get("pinned_silos", [])
+        if isinstance(pinned, str):
+            import ast
+
+            try:
+                pinned = ast.literal_eval(pinned)
+            except Exception:
+                pinned = []
+        if isinstance(pinned, list):
+            self.data["pinned_silos"] = [remap(p) for p in pinned]
+
+    def move_temp_to_index(self, from_idx, to_idx, is_archive=False):
+        """Move a silo to a new position, shifting the others (drop 'between' silos)."""
+        if from_idx == to_idx:
+            return
+        if not getattr(self, "editing_snippet", None):
+            target = self.data[
+                "archive_temp_presets"
+                if getattr(self, "active_is_archive", False)
+                else "temp_presets"
+            ]
+            slot = getattr(self, "active_temp_slot", 0)
+            if 0 <= slot < len(target):
+                target[slot] = self.text_area.toPlainText()
+        temps = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        docs = self.archive_docs if is_archive else self.silo_docs
+        if not (0 <= from_idx < len(temps)):
+            return
+        to_idx = max(0, min(len(temps) - 1, to_idx))
+        if from_idx == to_idx:
+            return
+        self.add_data_undo_state("Move silo")
+
+        from PyQt6.QtGui import QTextDocument
+
+        while len(docs) <= max(from_idx, to_idx):
+            d = QTextDocument()
+            d.setDefaultFont(self.text_area.font())
+            if len(docs) < len(temps):
+                d.setPlainText(temps[len(docs)])
+            docs.append(d)
+
+        self._suspend_cache = True
+        temps.insert(to_idx, temps.pop(from_idx))
+        docs.insert(to_idx, docs.pop(from_idx))
+
+        def remap(i):
+            if i == from_idx:
+                return to_idx
+            if from_idx < to_idx and from_idx < i <= to_idx:
+                return i - 1
+            if to_idx < from_idx and to_idx <= i < from_idx:
+                return i + 1
+            return i
+
+        if getattr(self, "active_is_archive", False) == is_archive:
+            self.active_temp_slot = remap(getattr(self, "active_temp_slot", 0))
+        if not is_archive:
+            self._remap_silo_indices(remap)
+        self._suspend_cache = False
+        self.mark_dirty()
+        self.refresh_temp_presets()
+        if is_archive:
+            self.refresh_archive_panel()
+
+    def apply_window_flags(self, _=None):
+        self.data["always_on_top"] = "True" if self.cb_top.isChecked() else "False"
+        self.data["normal_window"] = "True" if self.cb_normal_window.isChecked() else "False"
+        flags = Qt.WindowType.Window
+        if not self.cb_normal_window.isChecked():
+            flags |= Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        # AOT is handled via SetWindowPos now to avoid flickering
+        self.unregister_all_hotkeys()
+        was_visible = self.isVisible()
+        self.setWindowFlags(flags)
+        if was_visible:
+            self.show()
+        self.register_all_hotkeys()
+        self.mark_dirty()
+
+    def move_preset_to_index(self, category, from_idx, to_idx):
+        if from_idx == to_idx:
+            return
+        self.add_data_undo_state("Move preset")
+        slots = self.data["categories"][category]
+        item = slots.pop(from_idx)
+        slots.insert(to_idx, item)
+        self.mark_dirty()
+        self.refresh_snippets_panel()
+
+    def move_preset_cross_category(self, from_cat, from_idx, to_cat, to_idx):
+        self.add_data_undo_state("Move preset cross category")
+
+        if from_cat == "silo":
+            if not (0 <= from_idx < len(self.data["temp_presets"])):
+                return
+            text = self.data["temp_presets"].pop(from_idx)
+            if from_idx < len(self.silo_docs):
+                self.silo_docs.pop(from_idx)
+            item = {"name": text[:20], "text": text}
+            if not getattr(self, "active_is_archive", False):
+                if from_idx < self.active_temp_slot:
+                    self.active_temp_slot -= 1
+                elif from_idx == self.active_temp_slot:
+                    self.active_temp_slot = (
+                        max(0, self.active_temp_slot - 1) if self.data["temp_presets"] else 0
+                    )
+        elif from_cat == "arcsilo":
+            if not (0 <= from_idx < len(self.data.get("archive_temp_presets", []))):
+                return
+            text = self.data["archive_temp_presets"].pop(from_idx)
+            if from_idx < len(self.archive_docs):
+                self.archive_docs.pop(from_idx)
+            item = {"name": text[:20], "text": text}
+            if getattr(self, "active_is_archive", False):
+                if from_idx < self.active_temp_slot:
+                    self.active_temp_slot -= 1
+                elif from_idx == self.active_temp_slot:
+                    self.active_temp_slot = (
+                        max(0, self.active_temp_slot - 1)
+                        if self.data["archive_temp_presets"]
+                        else 0
+                    )
+        else:
+            item = self.data["categories"][from_cat].pop(from_idx)
+            slots = self.data["categories"][from_cat]
+            if len(slots) < 100:
+                slots.append(None)
+
+        if to_cat == "silo":
+            self.data["temp_presets"].insert(to_idx, item["text"] if item else "")
+            doc = QTextDocument()
+            doc.setDefaultFont(self.text_area.font())
+            doc.setPlainText(item["text"] if item else "")
+            self.silo_docs.insert(to_idx, doc)
+        elif to_cat == "arcsilo":
+            if "archive_temp_presets" not in self.data:
+                self.data["archive_temp_presets"] = []
+            self.data["archive_temp_presets"].insert(to_idx, item["text"] if item else "")
+            doc = QTextDocument()
+            doc.setDefaultFont(self.text_area.font())
+            doc.setPlainText(item["text"] if item else "")
+            self.archive_docs.insert(to_idx, doc)
+        else:
+            slots = self.data["categories"][to_cat]
+            slots.insert(to_idx, item)
+            # Only pop if the last item is None (empty). Otherwise, let the array grow so we don't lose data!
+            if slots[-1] is None:
+                slots.pop()
+
+        self._trim_archive()
+        self.mark_dirty()
+        self.refresh_snippets_panel()
+        self.refresh_temp_presets()
+        self.refresh_archive_panel()
+
+    def swap_cross_temp_slots(self, source_idx, target_idx, source_is_archive, target_is_archive):
+        if not getattr(self, "editing_snippet", None):
+            target = self.data[
+                "archive_temp_presets"
+                if getattr(self, "active_is_archive", False)
+                else "temp_presets"
+            ]
+            slot = getattr(self, "active_temp_slot", 0)
+            if 0 <= slot < len(target):
+                target[slot] = self.text_area.toPlainText()
+        self.add_data_undo_state("Swap cross temp slots")
+        source_arr = (
+            self.data["archive_temp_presets"] if source_is_archive else self.data["temp_presets"]
+        )
+        target_arr = (
+            self.data["archive_temp_presets"] if target_is_archive else self.data["temp_presets"]
+        )
+        source_docs = self.archive_docs if source_is_archive else self.silo_docs
+        target_docs = self.archive_docs if target_is_archive else self.silo_docs
+
+        # We need to make sure arrays are long enough
+        while len(source_arr) <= source_idx:
+            source_arr.append("")
+        while len(target_arr) <= target_idx:
+            target_arr.append("")
+
+        from PyQt6.QtGui import QTextDocument
+
+        while len(source_docs) <= source_idx:
+            d = QTextDocument()
+            d.setDefaultFont(self.text_area.font())
+            source_docs.append(d)
+        while len(target_docs) <= target_idx:
+            d = QTextDocument()
+            d.setDefaultFont(self.text_area.font())
+            target_docs.append(d)
+
+        source_arr[source_idx], target_arr[target_idx] = (
+            target_arr[target_idx],
+            source_arr[source_idx],
+        )
+        source_docs[source_idx], target_docs[target_idx] = (
+            target_docs[target_idx],
+            source_docs[source_idx],
+        )
+
+        self._trim_archive()
+        self.mark_dirty()
+        self.refresh_temp_presets()
+        self.refresh_archive_panel()
+
+    def on_wrap_toggled(self, checked):
+        self.data["word_wrap"] = "True" if checked else "False"
+        self.apply_wrap_mode()
+        self.mark_dirty()
+
+    def on_line_numbers_toggled(self, checked):
+        self.data["show_line_numbers"] = "True" if checked else "False"
+        self.text_area.update_line_number_area_width()
+        self.text_area.line_number_area.update()
+        self.mark_dirty()
+
+    def apply_wrap_mode(self):
+        wrap = self.data.get("word_wrap", "True") == "True"
+        self.text_area.setLineWrapMode(
+            QTextEdit.LineWrapMode.WidgetWidth if wrap else QTextEdit.LineWrapMode.NoWrap
+        )
+
+    def open_hotkey_settings(self):
+        dlg = HotkeySettingsDialog(self)
+        self.ignore_focus_loss = True
+        try:
+            dlg.exec()
+        finally:
+            self.ignore_focus_loss = False
+
+    def _snapshot_current(self):
+        return {
+            "categories": copy.deepcopy(self.data["categories"]),
+            "temp_presets": copy.deepcopy(self.data["temp_presets"]),
+            "archive_temp_presets": copy.deepcopy(self.data["archive_temp_presets"]),
+            "active_temp_slot": self.active_temp_slot,
+            "active_is_archive": getattr(self, "active_is_archive", False),
+            "editing_snippet": getattr(self, "editing_snippet", None),
+        }
+
+    def undo_action(self):
+        if hasattr(self, "data_undo_stack") and self.data_undo_stack:
+            if not hasattr(self, "data_redo_stack"):
+                self.data_redo_stack = []
+            redo_state = self._snapshot_current()
+            self.data_redo_stack.append(redo_state)
+            if len(self.data_redo_stack) > 50:
+                self.data_redo_stack.pop(0)
+            state = self.data_undo_stack.pop()
+            self._apply_data_state(state)
+            self.play_sound("tick")
+            return
+        # Text undo is handled natively by QTextEdit via VaultTextEdit.keyPressEvent
+
+    def redo_action(self):
+        if hasattr(self, "data_redo_stack") and self.data_redo_stack:
+            if not hasattr(self, "data_undo_stack"):
+                self.data_undo_stack = []
+            undo_state = self._snapshot_current()
+            self.data_undo_stack.append(undo_state)
+            state = self.data_redo_stack.pop()
+            self._apply_data_state(state)
+            self.play_sound("tick")
+            return
+        # Text redo is handled natively by QTextEdit via VaultTextEdit.keyPressEvent
+
+    def _apply_data_state(self, state):
+        self.data["categories"] = state["categories"]
+        self.data["temp_presets"] = state["temp_presets"]
+        self.data["archive_temp_presets"] = state["archive_temp_presets"]
+        from PyQt6.QtGui import QTextDocument
+
+        font = self.text_area.font()
+        while len(self.silo_docs) < len(self.data["temp_presets"]):
+            d = QTextDocument()
+            d.setDefaultFont(font)
+            self.silo_docs.append(d)
+        while len(self.silo_docs) > len(self.data["temp_presets"]):
+            self.silo_docs.pop()
+        for i, txt in enumerate(self.data["temp_presets"]):
+            if self.silo_docs[i].toPlainText() != txt:
+                self._set_plain_text_clean(self.silo_docs[i], txt)
+        while len(self.archive_docs) < len(self.data["archive_temp_presets"]):
+            d = QTextDocument()
+            d.setDefaultFont(font)
+            self.archive_docs.append(d)
+        while len(self.archive_docs) > len(self.data["archive_temp_presets"]):
+            self.archive_docs.pop()
+        for i, txt in enumerate(self.data["archive_temp_presets"]):
+            if self.archive_docs[i].toPlainText() != txt:
+                self._set_plain_text_clean(self.archive_docs[i], txt)
+        active_is_archive = state.get("active_is_archive", False)
+        active_slot = state.get("active_temp_slot", 0)
+        editing = state.get("editing_snippet", None)
+        self.mark_dirty()
+        self.build_categories()
+        if editing:
+            self._suspend_cache = True
+            self.text_area.blockSignals(True)
+            snippet_key = f"{editing[0]}_{editing[1]}"
+            cat_data = self.data["categories"].get(editing[0])
+            slot = cat_data[editing[1]] if cat_data and editing[1] < len(cat_data) else None
+            if slot and snippet_key in self.snippet_docs:
+                doc = self.snippet_docs[snippet_key]
+                if doc.toPlainText() != slot.get("text", ""):
+                    self._set_plain_text_clean(doc, slot["text"])
+                self.text_area.set_active_document(doc)
+            else:
+                doc = QTextDocument()
+                doc.setDefaultFont(self.text_area.font())
+                if slot:
+                    doc.setPlainText(slot.get("text", ""))
+                self.text_area.set_active_document(doc)
+            self.text_area.blockSignals(False)
+            self.editing_snippet = editing
+            self.btn_save.setText("Save Snippet")
+            theme_name = self.data.get("theme", "Default")
+            if theme_name in THEMES:
+                self.btn_save.setStyleSheet(THEMES[theme_name].get("btn_save_snippet", ""))
+            self._suspend_cache = False
+        else:
+            self._suspend_cache = True
+            self.cancel_editing()
+            self.active_is_archive = active_is_archive
+            if active_is_archive:
+                if active_slot < len(self.data["archive_temp_presets"]):
+                    self._switch_to_slot(active_slot, initial=True, is_archive=True)
+            elif active_slot < len(self.data["temp_presets"]):
+                self._switch_to_slot(active_slot, initial=True)
+            self._suspend_cache = False
+        self.refresh_temp_presets()
+        self.refresh_archive_panel()
+
+    def add_data_undo_state(self, _action_name=""):
+        if not hasattr(self, "data_undo_stack"):
+            self.data_undo_stack = []
+        if not hasattr(self, "data_redo_stack"):
+            self.data_redo_stack = []
+        state = self._snapshot_current()
+        self.data_undo_stack.append(state)
+        if len(self.data_undo_stack) > 50:
+            self.data_undo_stack.pop(0)
+        self.data_redo_stack.clear()
+
+    def build_categories(self):
+        """Rebuild the tab bar from cats_order."""
+        self.tab_bar.blockSignals(True)
+        while self.tab_bar.count() > 0:
+            self.tab_bar.removeTab(0)
+        for cat in self.data["cats_order"]:
+            self.tab_bar.addTab(cat)
+        self.tab_bar.blockSignals(False)
+        if self.tab_bar.count() > 0:
+            self.tab_bar.setCurrentIndex(0)
+        self.refresh_snippets_panel()
+
+    def commit_current_text(self):
+        """Commit the current text to the active slot."""
+        if getattr(self, "_initializing_ui", False):
+            return
+        current_text = self.text_area.toPlainText()
+        if not self.editing_snippet:
+            if 0 <= self.active_temp_slot < len(self.data["temp_presets"]):
+                self.data["temp_presets"][self.active_temp_slot] = current_text
+        else:
+            cat, idx = self.editing_snippet
+            if cat in self.data["categories"] and self.data["categories"][cat][idx]:
+                self.data["categories"][cat][idx]["text"] = current_text
+
+    def open_color_settings(self):
+        dlg = ColorConfigDialog(self)
+        self.ignore_focus_loss = True
+        try:
+            dlg.exec()
+        finally:
+            self.ignore_focus_loss = False
+
+    def backup_db(self):
+        from fastprompter.ui.backup_dialog import BackupDialog
+
+        dlg = BackupDialog(self)
+        dlg.exec()
+
+    def restore_db(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Restore Backup", "", "SQLite DB (*.db *.bak);;All Files (*)"
+        )
+        if not path:
+            return
+        self.ignore_focus_loss = True
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Confirm",
+                "App will restart. Proceed?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                db_path = self.state.db_path
+                if os.path.abspath(path) == os.path.abspath(db_path):
+                    QMessageBox.warning(self, "Error", "Source and destination are the same file.")
+                    return
+                if self.state.conn:
+                    self.state.conn.close()
+                    self.state.conn = None
+                self.conn = None
+                time.sleep(0.1)
+                shutil.copy2(path, db_path)
+                for ext in ["-wal", "-shm"]:
+                    if os.path.exists(db_path + ext):
+                        try:
+                            os.remove(db_path + ext)
+                        except Exception:
+                            import traceback
+
+                            traceback.print_exc()
+                self.quit_app()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to restore backup:\n{e}")
+            self.state.init_db()
+            self.conn = self.state.conn
+        finally:
+            self.ignore_focus_loss = False
+
+    def _position_archive_overlay(self):
+        if not hasattr(self, "archive_section") or not hasattr(self, "left_panel"):
+            return
+        self.archive_section.setFixedWidth(self.left_panel.width())
+        self.archive_section.adjustSize()
+        ah = self.archive_section.sizeHint().height()
+        lh = self.left_panel.height()
+        self.archive_section.move(0, max(0, lh - ah))
+        self.archive_section.raise_()
+
+    def on_archive_toggle(self, checked):
+        self.data["archive_visible"] = "True" if checked else "False"
+        self.archive_section.setVisible(checked)
+        if checked:
+            self._position_archive_overlay()
+
+        if self.btn_toggle_archive.isChecked() != checked:
+            self.btn_toggle_archive.blockSignals(True)
+            self.btn_toggle_archive.setChecked(checked)
+            self.btn_toggle_archive.blockSignals(False)
+
+        self.mark_dirty()
+        self.text_area.setFocus()
+
+    def move_cursor_home(self):
+        cursor = self.text_area.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.text_area.setTextCursor(cursor)
+        self.text_area.ensureCursorVisible()
+        self.text_area.setFocus()
+
+    def move_cursor_end(self):
+        cursor = self.text_area.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.text_area.setTextCursor(cursor)
+        self.text_area.ensureCursorVisible()
+        self.text_area.setFocus()
+
+    def moveEvent(self, event):
+        if getattr(self, "is_locked", False) and getattr(self, "_locked_geometry", None):
+            if self.geometry() != self._locked_geometry:
+                self.setGeometry(self._locked_geometry)
+                return
+        self._update_last_geometry()
+        super().moveEvent(event)
+
+    def closeEvent(self, event):
+        self.save_data_to_db(force=True)
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        if getattr(self, "is_locked", False) and getattr(self, "_locked_geometry", None):
+            if self.geometry() != self._locked_geometry:
+                self.setGeometry(self._locked_geometry)
+                return
+        self._update_last_geometry()
+
+        # Update edge resizers
+        if hasattr(self, "_resizers"):
+            t = 6
+            w, h = self.width(), self.height()
+            self._resizers["left"].setGeometry(0, t, t, h - 2 * t)
+            self._resizers["right"].setGeometry(w - t, t, t, h - 2 * t)
+            self._resizers["top"].setGeometry(t, 0, w - 2 * t, t)
+            self._resizers["bottom"].setGeometry(t, h - t, w - 2 * t, t)
+            self._resizers["topleft"].setGeometry(0, 0, t, t)
+            self._resizers["topright"].setGeometry(w - t, 0, t, t)
+            self._resizers["bottomleft"].setGeometry(0, h - t, t, t)
+            self._resizers["bottomright"].setGeometry(w - t, h - t, t, t)
+            for r in self._resizers.values():
+                r.raise_()
+
+        super().resizeEvent(event)
+
+    # def nativeEvent(self, eventType, message):
+    #     return super().nativeEvent(eventType, message)
+
+    def mousePressEvent(self, event):
+        if sip.isdeleted(self):
+            return
+        if getattr(self, "is_locked", False):
+            event.ignore()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if sip.isdeleted(self):
+            return
+        if getattr(self, "is_locked", False):
+            return
+
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            if hasattr(self, "_drag_pos"):
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if sip.isdeleted(self):
+            return
+        if hasattr(self, "_drag_pos"):
+            del self._drag_pos
+            event.accept()
+
+    def changeEvent(self, event):
+        if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowDeactivate):
+            if not self.isActiveWindow() and not self.isMinimized():
+                if getattr(self, "cb_focus", None) and self.cb_focus.isChecked():
+                    if not getattr(self, "ignore_focus_loss", False) and not getattr(
+                        self, "is_locked", False
+                    ):
+                        self.hide_and_save()
+        super().changeEvent(event)
+
+    def eventFilter(self, obj, event):
+        if sip.isdeleted(self) or (obj and sip.isdeleted(obj)):
+            return False
+
+        if obj == getattr(self, "silos_widget", None) and event.type() == QEvent.Type.Resize:
+            self._update_visible_silo_count()
+            if hasattr(self, "_silo_resize_debounce_timer"):
+                self._silo_resize_debounce_timer.start()
+            return False
+
+        if obj == getattr(self, "left_panel", None) and event.type() == QEvent.Type.Resize:
+            self._position_archive_overlay()
+            return False
+
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and getattr(event, "button", lambda: 0)() == Qt.MouseButton.RightButton
+        ):
+            if not getattr(self, "is_locked", False):
+                self._text_drag_pos = (
+                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                )
+                return False
+        elif (
+            event.type() == QEvent.Type.MouseMove
+            and getattr(event, "buttons", lambda: 0)() & Qt.MouseButton.RightButton
+        ):
+            if not getattr(self, "is_locked", False) and hasattr(self, "_text_drag_pos"):
+                self.move(event.globalPosition().toPoint() - self._text_drag_pos)
+                return True
+        elif (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and getattr(event, "button", lambda: 0)() == Qt.MouseButton.RightButton
+        ):
+            if hasattr(self, "_text_drag_pos"):
+                delattr(self, "_text_drag_pos")
+                return False
+        return super().eventFilter(obj, event)
+
+    def add_category(self):
+        self.play_sound("new")
+        if len(self.data["cats_order"]) >= 5:
+            QMessageBox.information(
+                self, "Tab Limit", "Maximum of 5 tabs/projects. Remove one first."
+            )
+            return
+        self.ignore_focus_loss = True
+        try:
+            name, ok = QInputDialog.getText(self, "New Tab", "Enter tab name:")
+        finally:
+            self.ignore_focus_loss = False
+        self.activateWindow()
+        if ok and name and name.strip() not in self.data["cats_order"]:
+            self.add_data_undo_state("Add category")
+            name = name.strip()
+            self.data["cats_order"].append(name)
+            self.data["categories"][name] = [None] * 100
+            self.tab_bar.addTab(name)
+            self.tab_bar.setCurrentIndex(self.tab_bar.count() - 1)
+            self.mark_dirty()
+
+    def del_category(self):
+        self.play_sound("delete")
+        if self.tab_bar.count() <= 1:
+            return
+        idx = self.tab_bar.currentIndex()
+        cat = self.data["cats_order"][idx]
+        self.ignore_focus_loss = True
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Delete Tab",
+                f"Nuke '{cat}' and all snippets?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+        finally:
+            self.ignore_focus_loss = False
+        self.activateWindow()
+        if reply == QMessageBox.StandardButton.Yes:
+            self.add_data_undo_state("Delete category")
+            self.data["cats_order"].pop(idx)
+            del self.data["categories"][cat]
+            if cat in self.current_pages:
+                del self.current_pages[cat]
+            self.tab_bar.removeTab(idx)
+            self.mark_dirty()
+
+    def _wheel_switch_tab(self, direction):
+        """Mouse wheel over the tab bar switches projects."""
+        idx = self.tab_bar.currentIndex() + direction
+        if 0 <= idx < self.tab_bar.count():
+            self.tab_bar.setCurrentIndex(idx)
+
+    def _on_escape(self):
+        """Esc closes the search bar first; a second Esc hides the window."""
+        if hasattr(self, "search_frame") and self.search_frame.isVisible():
+            self.close_search()
+            return
+        self.hide_and_save()
+
+    def on_tab_changed(self, index):
+        if index < 0:
+            return
+        self.data["last_tab_idx"] = index
+        self.commit_current_text()
+        self.cancel_editing()
+
+        # Switch Silos to the new Tab's hierarchy
+        cats = self.data.get("cats_order", [])
+        if index >= len(cats):
+            return
+        cat = cats[index]
+        if "temp_presets_all" in self.data:
+            if cat not in self.data["temp_presets_all"]:
+                self.data["temp_presets_all"][cat] = [""] * 10
+            if cat not in self.data["archive_temp_presets_all"]:
+                self.data["archive_temp_presets_all"][cat] = []
+            self.data["temp_presets"] = self.data["temp_presets_all"][cat]
+            self.data["archive_temp_presets"] = self.data["archive_temp_presets_all"][cat]
+
+            # Rebuild document caches for the new silos
+            from PyQt6.QtGui import QTextDocument
+
+            font = self.text_area.font()
+            self.silo_docs = []
+            for text in self.data["temp_presets"]:
+                doc = QTextDocument()
+                doc.setDefaultFont(font)
+                self._set_plain_text_clean(doc, text)
+                self.silo_docs.append(doc)
+            self.archive_docs = []
+            for text in self.data["archive_temp_presets"]:
+                doc = QTextDocument()
+                doc.setDefaultFont(font)
+                self._set_plain_text_clean(doc, text)
+                self.archive_docs.append(doc)
+
+            # Keep active slot within bounds and switch to it
+            self.active_temp_slot = max(
+                0, min(self.active_temp_slot, len(self.data["temp_presets"]) - 1)
+            )
+            self._switch_to_slot(self.active_temp_slot, initial=True)
+            self.refresh_temp_presets()
+
+        self.refresh_snippets_panel()
+        self.mark_dirty()
+        self.text_area.setFocus()
+
+    def change_page(self, delta):
+        cat = self.get_current_category()
+        if not cat or cat not in self.data.get("categories", {}):
+            return
+        active = sum(1 for s in self.data["categories"][cat] if s is not None)
+        max_page = max(0, math.ceil(active / 10.0) - 1)
+        new_page = self.current_pages.get(cat, 0) + delta
+        if 0 <= new_page <= max_page:
+            self.current_pages[cat] = new_page
+            self.refresh_snippets_panel()
+
+    def change_arc_page(self, delta):
+        total = len(self.data.get("archive_temp_presets", []))
+        visible_count = 10
+        max_page = max(0, math.ceil(total / max(1, visible_count)) - 1)
+        new_page = getattr(self, "arc_silo_page", 0) + delta
+        if 0 <= new_page <= max_page:
+            self.arc_silo_page = new_page
+            self.data["arc_silo_page"] = new_page
+            self.refresh_archive_panel()
+
+    def darken_color(self, hex_color, factor=0.75):
+        hex_color = hex_color.lstrip("#")
+        if len(hex_color) == 3:
+            hex_color = "".join(c + c for c in hex_color)
+        r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+        r, g, b = int(r * factor), int(g * factor), int(b * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def refresh_snippets_panel(self):
+        if self._suspend_cache or self._initializing_ui:
+            return
+        cat = self.get_current_category()
+        if not cat:
+            self.snippets_section.setVisible(False)
+            self.refresh_archive_panel()
+            return
+
+        query = self.search_bar.text().strip().lower()
+        active_items = []
+        for i, s in enumerate(self.data["categories"][cat]):
+            if s is not None:
+                if not query or query in s["name"].lower() or query in s["text"].lower():
+                    active_items.append((i, s))
+
+        total_active = len(active_items)
+        if total_active == 0:
+            self.snippets_section.setVisible(False)
+            self.refresh_archive_panel()
+            return
+
+        self.snippets_section.setVisible(True)
+        page = min(self.current_pages.get(cat, 0), max(0, math.ceil(total_active / 10.0) - 1))
+        self.current_pages[cat] = page
+
+        start_idx = page * 10
+        page_items = active_items[start_idx : start_idx + 10]
+
+        theme_name = self.data.get("theme", "Default")
+        if theme_name not in THEMES:
+            theme_name = "Default"
+        preset_colors = THEMES[theme_name]["preset_colors"]
+        font_family = self.data.get("font_family", "Verdana")
+        hide_keys = self.data.get("hide_shortkeys", "False") == "True"
+
+        try:
+            scale = float(self.data.get("ui_scale", "1.0"))
+        except Exception:
+            scale = 1.0
+
+        self._snippet_widget_cache.clear()
+        for i, w in enumerate(self.snippet_buttons):
+            if i < len(page_items):
+                global_idx, item = page_items[i]
+                d_idx = i + 1
+                key_label = (
+                    ""
+                    if hide_keys
+                    else (
+                        f"[{d_idx % 10 if d_idx % 10 != 0 else 0}] "
+                        if d_idx <= 10
+                        else f"[{d_idx}] "
+                    )
+                )
+                disp = item["name"]
+                color = preset_colors[global_idx % len(preset_colors)]
+                is_editing = self.editing_snippet and self.editing_snippet == (cat, global_idx)
+                last_ts = item.get("last_edited", 0)
+                if last_ts and not is_editing:
+                    diff = time.time() - last_ts
+                    custom = self._get_custom_colors()
+                    if diff < 60:
+                        overlay = QColor(custom.get("overlay_new", "#7a5555"))
+                    elif diff < 3600:
+                        overlay = QColor(custom.get("overlay_recent", "#7a6a40"))
+                    elif diff < 86400:
+                        overlay = QColor(custom.get("overlay_day", "#6a6a30"))
+                    elif diff < 4233600:
+                        overlay = QColor(custom.get("overlay_old", "#40556a"))
+                    else:
+                        overlay = None
+                    if overlay:
+                        base = QColor(color)
+                        color = self.blend_colors(base, overlay, 0.15)
+
+                w.update_data(
+                    f"{key_label}{disp}", cat, global_idx, item["text"], color, font_family, scale
+                )
+                self._snippet_widget_cache[(cat, global_idx)] = (
+                    w.main_btn if hasattr(w, "main_btn") else w
+                )
+                w.show()
+            else:
+                if hasattr(w, "main_btn"):
+                    w.main_btn.global_idx = -1
+                    w.main_btn.setText("")
+                    w.main_btn.full_text = ""
+                w.hide()
+
+        self.btn_page_up.setEnabled(page > 0)
+        self.btn_page_down.setEnabled(page < math.ceil(total_active / 10.0) - 1)
+        show_pagination = math.ceil(total_active / 10.0) > 1
+        self.btn_page_up.setVisible(show_pagination)
+        self.btn_page_down.setVisible(show_pagination)
+
+        self.snippets_widget.adjustSize()
+        self.snippets_section.adjustSize()
+        if getattr(self, "left_widget", None) and self.left_widget.parentWidget():
+            self.left_widget.parentWidget().updateGeometry()
+
+    def refresh_archive_panel(self):
+        self._trim_archive()
+        total = len(self.data.get("archive_temp_presets", []))
+        if total == 0:
+            self.archive_section.setVisible(False)
+            return
+
+        saved_arc_visible = self.data.get("archive_visible", "False") == "True"
+        self.archive_section.setVisible(saved_arc_visible)
+
+        visible_count = 10
+        max_page = max(0, math.ceil(total / max(1, visible_count)) - 1)
+
+        needs_visible = max_page > 0
+        self.btn_arc_page_up.setVisible(needs_visible)
+        self.btn_arc_page_down.setVisible(needs_visible)
+
+        self.arc_silo_page = min(getattr(self, "arc_silo_page", 0), max_page)
+        self.btn_arc_page_up.setEnabled(self.arc_silo_page > 0)
+        self.btn_arc_page_down.setEnabled(self.arc_silo_page < max_page)
+
+        theme_name = self.data.get("theme", "Default")
+        if theme_name not in THEMES:
+            theme_name = "Default"
+        inactive_color = THEMES[theme_name]["inactive_temp_color"]
+        active_color = THEMES[theme_name]["active_temp_color"]
+
+        custom_colors = self._get_custom_colors()
+        if "edit_bg" in custom_colors:
+            active_color = custom_colors["edit_bg"]
+
+        try:
+            scale = float(self.data.get("ui_scale", "1.0"))
+        except Exception:
+            scale = 1.0
+        font_family = self.data.get("font_family", "Verdana")
+
+        start_idx = self.arc_silo_page * visible_count
+
+        for i, btn in enumerate(self.archive_buttons):
+            slot_idx = start_idx + i
+            if i >= visible_count or slot_idx >= total:
+                btn.hide()
+                continue
+            raw = self.data["archive_temp_presets"][slot_idx]
+            text = (raw[:100] if len(raw) > 100 else raw).replace("\n", " ").strip()
+            display_idx = slot_idx + 1
+            line_count = raw.count("\n") + 1 if raw.strip() else 0
+            line_str = str(line_count) if line_count > 0 else ""
+            label = f"{display_idx}: {text}" if text else f"{display_idx}"
+            is_active = (
+                getattr(self, "active_is_archive", False)
+                and (slot_idx == self.active_temp_slot)
+                and not getattr(self, "editing_snippet", None)
+            )
+            bg_color = active_color if is_active else inactive_color
+            btn.update_data(label, slot_idx, bg_color, font_family, scale, line_count_str=line_str, is_pushed=is_active)
+            btn.show()
+
+        self.archive_widget.adjustSize()
+        self.archive_section.adjustSize()
+
+    def _trim_archive(self):
+        entries = self.data.get("archive_temp_presets", [])
+        if not entries:
+            return
+        new_entries = []
+        new_docs = []
+        old_to_new = {}
+        for i, item in enumerate(entries):
+            if item.strip():
+                old_to_new[i] = len(new_entries)
+                new_entries.append(item)
+                if hasattr(self, "archive_docs") and i < len(self.archive_docs):
+                    new_docs.append(self.archive_docs[i])
+        if len(new_entries) == len(entries):
+            return
+        self.data["archive_temp_presets"] = new_entries
+        if hasattr(self, "archive_docs"):
+            self.archive_docs = new_docs
+        if getattr(self, "active_is_archive", False):
+            old_idx = getattr(self, "active_temp_slot", -1)
+            if old_idx in old_to_new:
+                self.active_temp_slot = old_to_new[old_idx]
+            elif new_entries:
+                self.active_temp_slot = 0
+            else:
+                self.active_is_archive = False
+                self.active_temp_slot = max(
+                    0, min(self.active_temp_slot, len(self.data["temp_presets"]) - 1)
+                )
+        self.mark_dirty()
+
+    # move_preset_to_index is defined earlier in the class (uses pop+insert with undo)
+
+    def change_silo_page(self, delta):
+        last_used = -1
+        total_silos = len(self.data["temp_presets"])
+        for i in range(total_silos - 1, -1, -1):
+            if self.data["temp_presets"][i].strip():
+                last_used = i
+                break
+
+        # Determine the maximum slot currently visible/accessible
+        visible_silos = max(last_used + 1, self.active_temp_slot + 1, self._visible_silos)
+        max_page = max(0, math.ceil(visible_silos / max(1, self._visible_silos)) - 1)
+        new_page = self.silo_page + delta
+        if 0 <= new_page <= max_page:
+            self.silo_page = new_page
+            self.refresh_temp_presets()
+
+    def navigate_silo(self, delta):
+        """Move silo selection up/down the sidebar (Alt+Up / Alt+Down)."""
+        is_arc = getattr(self, "active_is_archive", False)
+        presets = self.data["archive_temp_presets" if is_arc else "temp_presets"]
+        if not presets:
+            return
+        if is_arc:
+            order = list(range(len(presets)))
+        else:
+            # Follow the visual order: pinned silos first, then the rest
+            pinned = self.data.get("pinned_silos", [])
+            if isinstance(pinned, str):
+                import ast
+
+                try:
+                    pinned = ast.literal_eval(pinned)
+                except Exception:
+                    pinned = []
+            total = len(presets)
+            order = [p for p in pinned if p < total] + [
+                j for j in range(total) if j not in pinned
+            ]
+        try:
+            pos = order.index(self.active_temp_slot)
+        except ValueError:
+            pos = 0
+        new_pos = max(0, min(len(order) - 1, pos + delta))
+        if order[new_pos] != self.active_temp_slot or self.editing_snippet:
+            self._switch_to_slot(order[new_pos], is_archive=is_arc)
+
+    def _switch_to_slot(self, idx, initial=False, is_archive=False):
+        if is_archive:
+            self.arc_silo_page = idx // 10
+        else:
+            self.silo_page = idx // max(1, self._visible_silos)
+
+        was_editing_snippet = bool(getattr(self, "editing_snippet", None))
+        was_archive = getattr(self, "active_is_archive", False)
+
+        if not initial:
+            self.play_click_sound()
+            self._cache_timer.stop()
+            if was_editing_snippet:
+                self.save_snippet(silent=True)
+            elif was_archive:
+                new_txt = self.text_area.toPlainText()
+                if new_txt.strip() and 0 <= self.active_temp_slot < len(
+                    self.data.get("archive_temp_presets", [])
+                ):
+                    self.data["archive_temp_presets"][self.active_temp_slot] = new_txt
+            else:
+                old_slot = self.active_temp_slot
+                new_text = self.text_area.toPlainText()
+                if 0 <= old_slot < len(self.data["temp_presets"]):
+                    old_text = self.data["temp_presets"][old_slot]
+                    self.data["temp_presets"][old_slot] = new_text
+                    if new_text != old_text:
+                        self.silo_last_edited[old_slot] = int(time.time())
+
+        if not is_archive:
+            if "temp_presets" not in self.data or not self.data["temp_presets"]:
+                self.data["temp_presets"] = [""]
+            if idx >= len(self.data["temp_presets"]):
+                idx = max(0, len(self.data["temp_presets"]) - 1)
+        else:
+            if "archive_temp_presets" not in self.data or not self.data["archive_temp_presets"]:
+                self.data["archive_temp_presets"] = [""]
+            if idx >= len(self.data["archive_temp_presets"]):
+                idx = max(0, len(self.data["archive_temp_presets"]) - 1)
+
+        # If we are already on this silo and not editing a snippet, early return
+        if (
+            not initial
+            and not was_editing_snippet
+            and self.active_temp_slot == idx
+            and getattr(self, "active_is_archive", False) == is_archive
+        ):
+            self._begin_batch_update()
+            try:
+                self.text_area.setFocus()
+                self.text_area.ensureCursorVisible()
+                if is_archive:
+                    self.refresh_archive_panel()
+                else:
+                    self.refresh_temp_presets()
+            finally:
+                self._end_batch_update()
+            return
+
+        if not initial:
+            self.add_data_undo_state("Switch silo")
+
+        self._begin_batch_update()
+        try:
+            self.cancel_editing(silent=True)
+            self.active_temp_slot = idx
+            self.active_is_archive = is_archive
+
+            self._suspend_cache = True
+            try:
+                self.text_area.blockSignals(True)
+
+                if is_archive:
+                    while len(self.archive_docs) <= idx:
+                        from PyQt6.QtGui import QTextDocument
+
+                        d = QTextDocument()
+                        d.setDefaultFont(self.text_area.font())
+                        self.archive_docs.append(d)
+                    doc = self.archive_docs[idx]
+                    archive = self.data.get("archive_temp_presets", [])
+                    if idx >= len(archive):
+                        archive = [""] * (idx + 1)
+                        self.data["archive_temp_presets"] = archive
+                    new_text = archive[idx]
+                else:
+                    if idx >= len(self.silo_docs):
+                        from PyQt6.QtGui import QTextDocument
+
+                        while len(self.silo_docs) <= idx:
+                            d = QTextDocument()
+                            d.setDefaultFont(self.text_area.font())
+                            self.silo_docs.append(d)
+                    doc = self.silo_docs[idx]
+                    new_text = self.data["temp_presets"][idx]
+
+                if doc.toPlainText() != new_text:
+                    self._set_plain_text_clean(doc, new_text)
+
+                self.text_area.set_active_document(doc)
+
+                if self.data.get("silo_home", "False") == "True":
+                    self.text_area.moveCursor(QTextCursor.MoveOperation.Start)
+                else:
+                    self.text_area.moveCursor(QTextCursor.MoveOperation.End)
+            finally:
+                self.text_area.blockSignals(False)
+                self._suspend_cache = False
+
+            self.refresh_temp_presets()
+            self.refresh_archive_panel()
+            self.update_preview()
+            self._update_line_count_label()
+            self.text_area.setFocus()
+            self.text_area.ensureCursorVisible()
+            if not initial:
+                self.mark_dirty()
+        finally:
+            self._end_batch_update()
+
+    def _switch_to_arc_slot(self, idx):
+        self._switch_to_slot(idx, is_archive=True)
+
+    def refresh_temp_presets(self):
+        total = len(self.data["temp_presets"])
+        if total == 0:
+            self.silos_section.setVisible(False)
+            return
+        if not hasattr(self, "silos_widget") or not hasattr(self, "silo_buttons"):
+            return
+
+        self.silos_section.setVisible(True)
+
+        self._update_visible_silo_count()
+        max_page = max(0, math.ceil(total / max(1, self._visible_silos)) - 1)
+        self.silo_page = min(self.silo_page, max_page)
+
+        self.btn_silo_up.setVisible(max_page > 0)
+        self.btn_silo_down.setVisible(max_page > 0)
+        self.btn_silo_up.setEnabled(self.silo_page > 0)
+        self.btn_silo_down.setEnabled(self.silo_page < max_page)
+
+        theme_name = self.data.get("theme", "Default")
+        if theme_name not in THEMES:
+            theme_name = "Default"
+        active_color = THEMES[theme_name]["active_temp_color"]
+        inactive_color = THEMES[theme_name]["inactive_temp_color"]
+
+        try:
+            scale = float(self.data.get("ui_scale", "1.0"))
+        except Exception:
+            scale = 1.0
+        font_family = self.data.get("font_family", "Verdana")
+
+        start_idx = self.silo_page * self._visible_silos
+        # Build sorted display order: pinned first in pin order, then unpinned by index
+        pinned_list = self.data.get("pinned_silos", [])
+        if isinstance(pinned_list, str):
+            import ast
+
+            try:
+                pinned_list = ast.literal_eval(pinned_list)
+            except Exception:
+                pinned_list = []
+        # Compute display order: pinned first (preserving pin-list order), then unpinned (by natural index)
+        unpinned = [j for j in range(total) if j not in pinned_list]
+        display_order = [p for p in pinned_list if p < total] + unpinned
+        for i, btn in enumerate(self.silo_buttons):
+            disp_pos = start_idx + i
+            if disp_pos >= total or i >= self._visible_silos:
+                btn.hide()
+                continue
+            slot_idx = display_order[disp_pos]
+            raw = self.data["temp_presets"][slot_idx]
+            is_pinned = slot_idx in pinned_list
+            text = (raw[:100] if len(raw) > 100 else raw).replace("\n", " ").strip()
+            display_idx = slot_idx + 1
+            line_count = raw.count("\n") + 1 if raw.strip() else 0
+            line_str = str(line_count) if line_count > 0 else ""
+            pin_str = "📌 " if is_pinned else ""
+            label = f"{pin_str}{display_idx}: {text}" if text else f"{pin_str}{display_idx}"
+            is_active = (
+                (not getattr(self, "active_is_archive", False))
+                and (slot_idx == self.active_temp_slot)
+                and not getattr(self, "editing_snippet", None)
+            )
+            bg_color = active_color if is_active else inactive_color
+            if text and slot_idx in self.silo_last_edited:
+                bg_color = self._overlay_silo_bg(bg_color, self.silo_last_edited[slot_idx])
+            btn.update_data(label, slot_idx, bg_color, font_family, scale, line_count_str=line_str, is_pushed=is_active)
+
+    def _overlay_silo_bg(self, bg_color, last_ts):
+        diff = time.time() - last_ts
+        custom = self._get_custom_colors()
+        if diff < 60:
+            overlay = QColor(custom.get("overlay_new", "#6a5555"))
+        elif diff < 3600:
+            overlay = QColor(custom.get("overlay_recent", "#6a5a40"))
+        elif diff < 86400:
+            overlay = QColor(custom.get("overlay_day", "#5a5a30"))
+        elif diff < 4233600:
+            overlay = QColor(custom.get("overlay_old", "#40506a"))
+        else:
+            overlay = None
+        if overlay:
+            base = QColor(bg_color)
+            return self.blend_colors(base, overlay, 0.25)
+        return bg_color
+
+    @staticmethod
+    def blend_colors(c1, c2, ratio):
+        return f"#{int(c1.red() * (1 - ratio) + c2.red() * ratio):02x}{int(c1.green() * (1 - ratio) + c2.green() * ratio):02x}{int(c1.blue() * (1 - ratio) + c2.blue() * ratio):02x}"
+
+    def show_temp_menu(self, idx, pos, is_archive=False):
+        cur = self.text_area.toPlainText().strip()
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.setFont(QApplication.font())
+        if cur:
+            menu.addAction("Save text as Snippet", self.save_snippet)
+            menu.addAction("Save as Snippet #...", self.save_snippet_as_number)
+        if (
+            is_archive
+            and idx < len(self.data.get("archive_temp_presets", []))
+            and self.data["archive_temp_presets"][idx]
+        ) or (
+            not is_archive
+            and idx < len(self.data["temp_presets"])
+            and self.data["temp_presets"][idx]
+        ):
+            menu.addAction(f"Clear Silo {idx + 1}", lambda: self.clear_temp(idx, is_archive))
+
+        # Pin/Unpin silo (only for non-archive)
+        if not is_archive:
+            pinned_list = self.data.get("pinned_silos", [])
+            if isinstance(pinned_list, str):
+                import ast
+
+                try:
+                    pinned_list = ast.literal_eval(pinned_list)
+                except Exception:
+                    pinned_list = []
+            if idx in pinned_list:
+                menu.addAction(f"Unpin Silo {idx + 1}", lambda i=idx: self._toggle_pin_silo(i))
+            else:
+                menu.addAction(f"Pin Silo {idx + 1}", lambda i=idx: self._toggle_pin_silo(i))
+
+        # Transfer to Snippet
+        presets_list = (
+            self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        )
+        if idx < len(presets_list) and presets_list[idx] and presets_list[idx].strip():
+            menu.addAction(
+                f"Transfer Silo {idx + 1} to Snippet",
+                lambda i=idx, a=is_archive: self._transfer_to_snippet(i, a),
+            )
+            transfer_menu = menu.addMenu("Transfer to Project:")
+            for cat_name in self.data.get("cats_order", list(self.data["categories"].keys())):
+                if cat_name not in self.data["categories"]:
+                    continue
+                transfer_menu.addAction(
+                    cat_name,
+                    lambda i=idx, a=is_archive, c=cat_name: self._transfer_to_snippet(i, a, target_cat=c),
+                )
+            menu.addAction(
+                f"Move Silo {idx + 1} to Bottom",
+                lambda i=idx, a=is_archive: self._move_silo_to_bottom(i, a),
+            )
+
+        # Replace Silo submenu — shows all non-empty silos to copy text from
+        presets = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        replace_menu = menu.addMenu(f"Replace Silo {idx + 1} from...")
+        has_source = False
+        for src_i, src_text in enumerate(presets):
+            if src_i == idx or not src_text or not src_text.strip():
+                continue
+            has_source = True
+            label = src_text.strip().replace("\n", " ")[:30] + (
+                "…" if len(src_text.strip()) > 30 else ""
+            )
+            act_label = f"Silo {src_i + 1}: {label}"
+
+            def make_replace(target_idx=idx, src_idx=src_i, archive=is_archive):
+                def do_replace():
+                    src_presets = (
+                        self.data["archive_temp_presets"] if archive else self.data["temp_presets"]
+                    )
+                    src_presets[target_idx] = src_presets[src_idx]
+                    self.mark_dirty()
+                    self.refresh_temp_presets()
+                    if target_idx == self.active_temp_slot:
+                        self._set_plain_text_clean(self.text_area, src_presets[target_idx])
+
+                return do_replace
+
+            replace_menu.addAction(act_label, make_replace())
+        if not has_source:
+            replace_menu.setEnabled(False)
+
+        self.ignore_focus_loss = True
+        try:
+            menu.exec(pos)
+        finally:
+            self.ignore_focus_loss = False
+        self.activateWindow()
+
+
+
+    def _transfer_to_snippet(self, idx, is_archive, target_cat=None):
+        """Transfer silo content to a new snippet in the current (or given) category."""
+        presets = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        if idx >= len(presets) or not presets[idx] or not presets[idx].strip():
+            return
+        text = presets[idx]
+        cat = target_cat if target_cat in self.data["categories"] else self.get_current_category()
+        if not cat:
+            return
+        slots = self.data["categories"][cat]
+        if None not in slots:
+            return
+        self.add_data_undo_state("Transfer to snippet")
+        empty_idx = slots.index(None)
+        name = text.replace("\n", " ")[:22]
+        if len(text) > 22:
+            name += "..."
+        slots[empty_idx] = {"name": name, "text": text, "last_edited": int(time.time())}
+        presets[idx] = ""
+        if idx == self.active_temp_slot and not getattr(self, "editing_snippet", None):
+            self.clear_text()
+        self.mark_dirty()
+        self.refresh_snippets_panel()
+        self.refresh_temp_presets()
+        self.play_sound("snippet")
+
+    def _toggle_pin_silo(self, idx):
+        """Toggle pin/unpin status for a silo."""
+        pinned = self.data.get("pinned_silos", [])
+        if isinstance(pinned, str):
+            import ast
+
+            try:
+                pinned = ast.literal_eval(pinned)
+            except Exception:
+                pinned = []
+        if idx in pinned:
+            pinned.remove(idx)
+        else:
+            pinned.insert(0, idx)
+        self.data["pinned_silos"] = pinned
+        self.mark_dirty()
+        self.refresh_temp_presets()
+
+    def _move_silo_to_bottom(self, idx, is_archive=False):
+        """Move a silo to the bottom of the order."""
+        presets = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        docs = self.archive_docs if is_archive else self.silo_docs
+        if not (0 <= idx < len(presets)):
+            return
+        if idx == len(presets) - 1:
+            return  # already at bottom
+        text = presets.pop(idx)
+        if idx < len(docs):
+            doc = docs.pop(idx)
+        else:
+            doc = None
+        presets.append(text)
+        if doc is not None:
+            docs.append(doc)
+        # Adjust active slot if needed
+        if not is_archive:
+            if idx == getattr(self, "active_temp_slot", 0):
+                self.active_temp_slot = len(presets) - 1
+            elif idx < getattr(self, "active_temp_slot", 0):
+                self.active_temp_slot -= 1
+        self.mark_dirty()
+        self.refresh_temp_presets()
+
+    def clear_temp(self, idx, is_archive=False):
+        # Clicking clear on an already-empty silo removes the slot entirely.
+        presets = self.data["archive_temp_presets"] if is_archive else self.data["temp_presets"]
+        if (
+            0 <= idx < len(presets)
+            and not presets[idx].strip()
+            and len(presets) > 1
+            and getattr(self, "active_is_archive", False) == is_archive
+        ):
+            self.del_silo(idx)
+            return
+        self.add_data_undo_state("Clear silo")
+        self.play_sound("clear")
+        if is_archive:
+            self.data["archive_temp_presets"][idx] = ""
+            if idx == self.active_temp_slot and getattr(self, "active_is_archive", False):
+                self.clear_text()
+            self._trim_archive()
+            self.refresh_archive_panel()
+        else:
+            self.data["temp_presets"][idx] = ""
+            if idx == self.active_temp_slot and not getattr(self, "active_is_archive", False):
+                self.clear_text()
+            self.refresh_temp_presets()
+        self.mark_dirty()
+
+    def archive_single_silo(self, idx):
+        """Archive a specific silo by index (called from hover button)."""
+        if getattr(self, "active_is_archive", False):
+            return
+        if not (0 <= idx < len(self.data.get("temp_presets", []))):
+            return
+        text = self.data["temp_presets"][idx]
+        if not text.strip():
+            return
+        if idx == self.active_temp_slot:
+            text = self.text_area.toPlainText().strip()
+            if not text:
+                return
+            self.data["temp_presets"][idx] = text
+        self.add_data_undo_state("Archive silo")
+        # Move to archive
+        if "archive_temp_presets" not in self.data:
+            self.data["archive_temp_presets"] = []
+        self.data["archive_temp_presets"].append(self.data["temp_presets"][idx])
+        self.data["temp_presets"][idx] = ""
+        # Sync docs
+        from PyQt6.QtGui import QTextDocument
+        font = self.text_area.font()
+        arc_doc = QTextDocument()
+        arc_doc.setDefaultFont(font)
+        arc_doc.setPlainText(text)
+        self.archive_docs.append(arc_doc)
+        if idx < len(self.silo_docs):
+            self.silo_docs[idx].setPlainText("")
+        # If archiving active silo, clear text area
+        if idx == self.active_temp_slot and not getattr(self, "active_is_archive", False):
+            self.clear_text()
+        self._trim_archive()
+        self.mark_dirty()
+        self.refresh_temp_presets()
+        self.refresh_archive_panel()
+
+    def safe_set_clipboard(self, text):
+        if text:
+            from PyQt6.QtGui import QGuiApplication
+
+            clip = QGuiApplication.clipboard()
+            if self.btn_format.text() != "Plain":
+                mime = QMimeData()
+                mime.setText(text)
+                mime.setHtml(self.simple_markdown_to_html(text))
+                clip.setMimeData(mime)
+            else:
+                clip.setText(text)
+
+    def insert_divider_line(self):
+        """Ctrl+W: Insert a markdown divider line (---) with smart spacing.
+
+        If called mid-line or on a non-empty line, jumps to the end first.
+        Inserts \\n\\n---\\n\\n and positions cursor on a fresh line ready to type.
+        """
+        cursor = self.text_area.textCursor()
+        cursor.beginEditBlock()
+
+        # Smart: if mid-line or on a non-empty line, jump to end first
+        block = cursor.block()
+        if cursor.positionInBlock() > 0 or block.text().strip():
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+
+        # Insert divider with generous spacing
+        cursor.insertText("\n\n---\n\n")
+
+        cursor.endEditBlock()
+        self.text_area.setTextCursor(cursor)
+        self.text_area.ensureCursorVisible()
+        self.text_area.setFocus()
+        self.mark_dirty()
+
+    def auto_paste(self, text):
+        if not text.strip():
+            return
+        self.safe_set_clipboard(text)
+        self.hide_and_save()
+        QTimer.singleShot(150, lambda: not sip.isdeleted(self) and self.simulate_ctrl_v())
+
+    @staticmethod
+    def simulate_ctrl_v():
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = (
+                ("wVk", ctypes.c_ushort),
+                ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            )
+
+        class INPUT_union(ctypes.Union):
+            _fields_ = (("ki", KEYBDINPUT), ("mi", ctypes.c_ulong * 6), ("hi", ctypes.c_ulong * 6))
+
+        class INPUT(ctypes.Structure):
+            _fields_ = (("type", ctypes.c_ulong), ("union", INPUT_union))
+
+        def send_key(vk, up=False):
+            i = INPUT(type=1)
+            i.union.ki.wVk = vk
+            i.union.ki.dwFlags = 2 if up else 0
+            ctypes.windll.user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
+
+        VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN = 0x10, 0x12, 0x5B, 0x5C
+        VK_CTRL, VK_V = 0x11, 0x56
+
+        for vk in (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN):
+            if ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
+                send_key(vk, True)
+
+        send_key(VK_CTRL)
+        send_key(VK_V)
+        send_key(VK_V, True)
+        send_key(VK_CTRL, True)
+
+    def setup_global_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(self.toggle_focus_mode)
+        QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.show_find)
+        QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self.show_replace)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self.save_silo_to_file)
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self._on_escape)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_snippet)
+        QShortcut(
+            QKeySequence("Ctrl+N"), self, context=Qt.ShortcutContext.ApplicationShortcut
+        ).activated.connect(self.select_empty_silo)
+        QShortcut(
+            QKeySequence("Ctrl+W"), self, context=Qt.ShortcutContext.ApplicationShortcut
+        ).activated.connect(self.insert_divider_line)
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self).activated.connect(self.redo_action)
+        # Keyboard silo navigation in the sidebar
+        QShortcut(
+            QKeySequence("Alt+Up"), self, context=Qt.ShortcutContext.ApplicationShortcut
+        ).activated.connect(lambda: self.navigate_silo(-1))
+        QShortcut(
+            QKeySequence("Alt+Down"), self, context=Qt.ShortcutContext.ApplicationShortcut
+        ).activated.connect(lambda: self.navigate_silo(1))
+        for i in range(1, 11):
+            key_num = i % 10
+            QShortcut(QKeySequence(f"F{i}"), self).activated.connect(
+                lambda i=i: self.fire_shortcut(i)
+            )
+            QShortcut(QKeySequence(f"Ctrl+{key_num}"), self).activated.connect(
+                lambda i=i: self._switch_to_slot(i - 1)
+            )
+            QShortcut(QKeySequence(f"Ctrl+Shift+{key_num}"), self).activated.connect(
+                lambda i=i: self.fire_shortcut(i)
+            )
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(self.cycle_snap_corner)
+        QShortcut(QKeySequence("Ctrl+Alt+Shift+Q"), self).activated.connect(self.quit_app)
+        QShortcut(QKeySequence("Ctrl+E"), self).activated.connect(self.apply_header_timestamp)
+        QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self.apply_bold_smart)
+
+    def fire_shortcut(self, idx):
+        self.play_sound("snippet")
+        cat = self.get_current_category()
+        if not cat:
+            return
+        query = self.search_bar.text().strip().lower()
+        active_items = []
+        for i, s in enumerate(self.data["categories"][cat]):
+            if s is not None:
+                if not query or query in s["name"].lower() or query in s["text"].lower():
+                    active_items.append((i, s))
+
+        page = self.current_pages.get(cat, 0)
+        start_idx = page * 10
+        page_items = active_items[start_idx : start_idx + 10]
+
+        i = idx - 1
+        if i < len(page_items):
+            global_idx, item = page_items[i]
+            self.auto_paste(item["text"])
+
+    def show_quick_list(self):
+        self.play_sound("tick")
+        w = QuickListWidget(self)
+        w.show()
+
+    def fire_global_snippet(self, idx):
+        self.play_sound("snippet")
+        cat = self.get_current_category()
+        if not cat:
+            return
+        active = [s for s in self.data["categories"].get(cat, []) if s is not None]
+        if 0 <= idx < len(active):
+            self.auto_paste(active[idx]["text"])
+
+    def fire_global_silo(self, idx):
+        self.play_sound("silo")
+        if 0 <= idx < len(self.data.get("temp_presets", [])):
+            text = self.data["temp_presets"][idx]
+            if text.strip():
+                self.auto_paste(text)
+
+    def fire_global_snippet_from_cat(self, cat, idx):
+        self.play_sound("snippet")
+        if not cat:
+            return
+        active_snippets = [s for s in self.data["categories"].get(cat, []) if s is not None]
+        if 0 <= idx < len(active_snippets):
+            self.auto_paste(active_snippets[idx]["text"])
+
+    def cycle_snap_corner(self):
+        screen = QApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        avail = screen.availableGeometry()
+
+        # Clamp dimensions to not overflow
+        w = min(960, avail.width())
+        h = min(540, avail.height())
+        self.resize(w, h)
+
+        if getattr(self, "_snap_first_press", True):
+            self.snap_index = 0
+            self._snap_first_press = False
+
+        corner_idx = self.snap_index % 4
+
+        sw, sh = avail.width(), avail.height()
+        QApplication.processEvents()
+        fw = self.frameGeometry().width()
+        fh = self.frameGeometry().height()
+        corners = [(sw - fw, sh - fh), (0, sh - fh), (0, 0), (sw - fw, 0)]
+        x, y = corners[corner_idx]
+        self.move(avail.x() + x, avail.y() + y)
+
+        self.snap_index = (self.snap_index + 1) % 4
+
+    def _update_line_count_label(self):
+        lbl = getattr(self, "lbl_line_count", None)
+        if lbl is None or sip.isdeleted(lbl):
+            return
+        doc = self.text_area.document()
+        lines = doc.blockCount() if doc.characterCount() > 1 else 0
+        lbl.setText(f"{lines} L" if lines else "")
+
+    def _on_text_changed(self):
+        self._update_line_count_label()
+        doc = self.text_area.document()
+        count = doc.characterCount()
+        if count > 50000:
+            interval = 2500
+        elif count > 20000:
+            interval = 1500
+        else:
+            interval = 800
+        if interval != self._cache_timer_interval:
+            self._cache_timer_interval = interval
+            self._cache_timer.setInterval(interval)
+        self._cache_timer.start()
+
+    def _on_cache_timer(self):
+        self.cache_current_text()
+
+    def cache_current_text(self):
+        if hasattr(self, "_last_deleted_preset"):
+            self._last_deleted_preset = None
+        if hasattr(self, "_last_deleted_silo_data"):
+            self._last_deleted_silo_data = None
+        if getattr(self, "_suspend_cache", False):
+            return
+        if getattr(self, "_initializing_ui", False):
+            return
+        if getattr(self, "_cache_in_progress", False):
+            return
+        self._cache_in_progress = True
+        try:
+            current_text = self.text_area.toPlainText()
+            self._last_cached_text = current_text
+            if not self.editing_snippet:
+                if 0 <= self.active_temp_slot < len(self.data["temp_presets"]):
+                    old_text = self.data["temp_presets"][self.active_temp_slot]
+                    self.data["temp_presets"][self.active_temp_slot] = current_text
+                    if current_text != old_text:
+                        self.mark_dirty()
+                        self.silo_last_edited[self.active_temp_slot] = int(time.time())
+                        self.refresh_temp_presets()
+            else:
+                cat, idx = self.editing_snippet
+                if cat in self.data["categories"] and self.data["categories"][cat][idx]:
+                    self.data["categories"][cat][idx]["text"] = current_text
+                    if cat == self.get_current_category():
+                        if len(current_text) > 100:
+                            t = current_text[:100].replace(chr(10), " ").strip()
+                        else:
+                            t = current_text.replace(chr(10), " ").strip()
+                        display_idx = idx + 1
+                        label = (
+                            f"{display_idx}: {t[:22]}…"
+                            if len(t) > 22
+                            else (f"{display_idx}: {t}" if t else str(display_idx))
+                        )
+                        main_btn = self._snippet_widget_cache.get((cat, idx))
+                        if main_btn is None:
+                            layout = getattr(self, "snippets_widget", None)
+                            if layout and hasattr(layout, "layout"):
+                                for i in range(layout.layout.count()):
+                                    item = layout.layout.itemAt(i)
+                                    if item and item.widget():
+                                        widget = item.widget()
+                                        main_btn = getattr(widget, "main_btn", None)
+                                        if (
+                                            main_btn
+                                            and getattr(main_btn, "cat", None) == cat
+                                            and getattr(main_btn, "global_idx", None) == idx
+                                        ):
+                                            self._snippet_widget_cache[(cat, idx)] = main_btn
+                                            break
+                        if main_btn:
+                            main_btn.setText(label)
+        finally:
+            self._cache_in_progress = False
+
+    @staticmethod
+    def _set_plain_text_clean(target, text):
+        doc = target.document() if hasattr(target, "document") else target
+        large = doc.blockCount() > 500 or len(text) > 10000
+        if not large:
+            doc.setUndoRedoEnabled(False)
+        doc.setPlainText(text)
+        if not large:
+            doc.setUndoRedoEnabled(True)
+
+    def hide_and_save(self):
+        self.save_data_to_db(force=True)
+        if getattr(self, "is_locked", False):
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            return
+        self.hide()
+
+    def quit_app(self):
+        self.save_data_to_db(force=True)
+        try:
+            if hasattr(self, "server") and self.server:
+                self.server.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "conn") and self.conn:
+                self.conn.close()
+        except Exception:
+            pass
+        # Null out every reference so the closeEvent save triggered by
+        # QApplication.quit() doesn't touch the closed connection.
+        self.conn = None
+        if hasattr(self, "state"):
+            self.state.conn = None
+        try:
+            if hasattr(self, "tray_icon"):
+                self.tray_icon.hide()
+        except Exception:
+            pass
+        QApplication.quit()
+
+
+def setup_exception_hook():
+    """Ensure unhandled exceptions are visible (written to crash.log and shown as MessageBox)."""
+    import traceback
+
+    old_hook = sys.excepthook
+
+    def hook(typ, val, tb):
+        error_msg = "".join(traceback.format_exception(typ, val, tb))
+        crash_log = os.path.join(get_data_dir(), "crash.log")
+        try:
+            with open(crash_log, "a") as f:
+                f.write(error_msg + chr(10))
+        except Exception:
+            pass
+        ctypes.windll.user32.MessageBoxW(
+            0, "FastPrompter Error:" + chr(10) * 2 + f"{error_msg}", "FastPrompter Error", 0x10
+        )
+        if old_hook:
+            old_hook(typ, val, tb)
+
+    sys.excepthook = hook
+
+
+def main_entry():
+    # Connect to existing instance or start new
+    sock = try_connect_to_server()
+    if sock:
+        token = sock.property("ipc_token") or ""
+        cmd = f"TOKEN:{token}|SHOW" if token else "SHOW"
+        sock.write(cmd.encode())
+        sock.flush()
+        sock.disconnectFromServer()
+        return
+
+    setup_exception_hook()
+
+    app = QApplication(sys.argv)
+    global_font = QFont("Verdana", 10)
+    global_font.setStyleStrategy(
+        QFont.StyleStrategy.NoAntialias | QFont.StyleStrategy.NoSubpixelAntialias
+    )
+    app.setFont(global_font)
+    app.setQuitOnLastWindowClosed(False)
+
+    # Create and show window
+    window = FastPrompter()
+    window.show()
+
+    # Install hotkey filter for global hotkeys
+    filter_obj = HotkeyFilter(window)
+    app.installNativeEventFilter(filter_obj)
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main_entry()
