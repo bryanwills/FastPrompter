@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/vacterro/FastPrompter/main/_res/fastprompter_logo1.png" alt="FastPrompter Logo" width="128" height="128"/><img width="960" height="540" alt="2026-07-09_055207" src="https://github.com/user-attachments/assets/ed96e54a-bbe8-4537-ae84-91caad21d586" />
+  <img src="https://raw.githubusercontent.com/vacterro/FastPrompter/main/_res/fastprompter_logo1.png" alt="FastPrompter Logo" width="128" height="128"/><img width="960" height="540" alt="2026-07-09_055207" 
 
   <h1 align="center">FastPrompter</h1>
   <p align="center">
