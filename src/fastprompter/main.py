@@ -826,28 +826,29 @@ class FastPrompter(
             line.setFrameShadow(QFrame.Shadow.Sunken)
             return line
 
+        # Equal stretch on every column so the groups spread across the
+        # full panel width instead of bunching up on the left.
         groups_row = QHBoxLayout()
         groups_row.setContentsMargins(2, 0, 2, 0)
         groups_row.setSpacing(8)
         groups_row.addLayout(_settings_group("Window", [
             self.cb_top, self.cb_lock_window, self.cb_normal_window,
             self.cb_tray, self.cb_sidebar,
-        ]))
+        ]), 1)
         groups_row.addWidget(_vline())
         groups_row.addLayout(_settings_group("Behavior", [
             self.cb_focus, self.cb_ctrl_c, self.cb_lock_cursor,
             self.cb_silo_home, self.cb_portable_backup,
-        ]))
+        ]), 1)
         groups_row.addWidget(_vline())
         groups_row.addLayout(_settings_group("Editor", [
             self.cb_wrap, self.cb_line_numbers, self.cb_zebra,
             self.cb_hide_shortkeys,
-        ]))
+        ]), 1)
         groups_row.addWidget(_vline())
         groups_row.addLayout(_settings_group("Sound", [
             self.cb_sound, self.cb_typewriter, vol_row,
-        ]))
-        groups_row.addStretch(1)
+        ]), 1)
 
         hline = QFrame()
         hline.setFrameShape(QFrame.Shape.HLine)
@@ -1281,10 +1282,14 @@ class FastPrompter(
         fmt.setFontUnderline(True)
         cursor.mergeCharFormat(fmt)
 
-        # Now append timestamp at end of line
+        # Append (DD.MM - hh:mm) timestamp at end of line, unless one is already there
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-        ts = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.insertText(f" {ts}")
+        import datetime
+        import re
+
+        if not re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)\s*$", cursor.block().text()):
+            ts = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
+            cursor.insertText(f" {ts}")
 
         cursor.endEditBlock()
 

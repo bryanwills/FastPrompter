@@ -203,6 +203,22 @@ def test_auto_bullet_space_and_enter(win):
     win.data["auto_bullet"] = "False"
 
 
+def test_ctrl_e_header_timestamp(win):
+    import re
+
+    win.data["temp_presets"] = ["My heading"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    win.apply_header_timestamp()
+    line = win.text_area.toPlainText().splitlines()[0]
+    assert line.startswith("# My heading")
+    assert re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)$", line), line
+    # Second press must not stack another header or timestamp
+    win.apply_header_timestamp()
+    line2 = win.text_area.toPlainText().splitlines()[0]
+    assert line2 == line
+
+
 def test_transfer_to_snippet_target_category(win):
     cats = win.data["cats_order"]
     target = cats[1] if len(cats) > 1 else cats[0]

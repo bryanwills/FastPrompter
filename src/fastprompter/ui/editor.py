@@ -520,9 +520,9 @@ class VaultTextEdit(QTextEdit):
             # Zebra striping: skip for large docs (>2000 blocks)
             zebra_enabled = not is_large and self.main_win.data.get("zebra_lines", "False") == "True"
             try:
-                zebra_alpha = min(60, max(2, int(self.main_win.data.get("zebra_opacity", "14"))))
+                zebra_alpha = min(90, max(2, int(self.main_win.data.get("zebra_opacity", "32"))))
             except Exception:
-                zebra_alpha = 14
+                zebra_alpha = 32
             zebra_odd = QColor(self.main_win.data.get("zebra_stripe_color", "#000000"))
             if not zebra_odd.isValid():
                 zebra_odd = QColor(0, 0, 0)
