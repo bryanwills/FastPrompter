@@ -386,6 +386,21 @@ class VaultTextEdit(QTextEdit):
             event.accept()
             return
 
+        if mods == Qt.KeyboardModifier.ControlModifier and event.key() in (
+            Qt.Key.Key_B, Qt.Key.Key_I, Qt.Key.Key_U, Qt.Key.Key_T
+        ):
+            # Markdown marker toggles — must run before QTextEdit's built-in
+            # rich-text shortcuts, whose formatting is lost on save
+            mw = self.main_win
+            key = event.key()
+            if key == Qt.Key.Key_B:
+                mw.apply_bold_smart()
+            else:
+                mw.apply_format({Qt.Key.Key_I: "italic", Qt.Key.Key_U: "underline",
+                                 Qt.Key.Key_T: "strike"}[key])
+            event.accept()
+            return
+
         if mods == Qt.KeyboardModifier.ControlModifier and event.key() in (Qt.Key.Key_Z, Qt.Key.Key_Y):
             # Ctrl+Z: route to the data-undo stack (silo clear/delete/move)
             # when appropriate; _smart_undo decides.

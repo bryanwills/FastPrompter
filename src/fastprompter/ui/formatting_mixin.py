@@ -33,27 +33,82 @@ class FormattingMixin:
         self._font_family, self._ui_scale
     """
 
+    # Formatting lives IN the text as markdown markers — it survives
+    # save/reload (the DB stores plain text) and copy-paste anywhere.
+    _MD_MARKERS = {"bold": "**", "italic": "*", "underline": "__", "strike": "~~"}
+
+    @staticmethod
+    def _md_wrapped(sel, marker):
+        """Is the selection exactly wrapped in this marker?"""
+        m = len(marker)
+        if not (sel.startswith(marker) and sel.endswith(marker) and len(sel) > 2 * m):
+            return False
+        if marker == "*":
+            # '**bold**' is not italic-wrapped ('***both***' is)
+            if sel.startswith("**") and not sel.startswith("***"):
+                return False
+            if sel.endswith("**") and not sel.endswith("***"):
+                return False
+        return True
+
     def apply_format(self, fmt_type):
-        """Apply bold/italic/underline/strikethrough formatting to selection."""
-        cursor = self.text_area.textCursor()
-        cursor.beginEditBlock()
-        fmt = cursor.charFormat()
+        """Toggle markdown markers around the selection (word at cursor if
+        nothing is selected). The highlighter renders the marked spans."""
+        marker = self._MD_MARKERS.get(fmt_type)
+        if marker is None:
+            return
+        ta = self.text_area
+        cursor = ta.textCursor()
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+            if not cursor.hasSelection():
+                return
+        doc_text = ta.toPlainText()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        sel = doc_text[start:end]
+        # keep markers tight against the text, not surrounding whitespace
+        start += len(sel) - len(sel.lstrip())
+        end -= len(sel) - len(sel.rstrip())
+        if start >= end:
+            return
+        sel = doc_text[start:end]
+        m = len(marker)
 
-        if fmt_type == "bold":
-            fmt.setFontWeight(
-                QFont.Weight.Bold if fmt.fontWeight() != QFont.Weight.Bold else QFont.Weight.Normal
+        wrapped_inside = self._md_wrapped(sel, marker)
+        wrapped_outside = False
+        if not wrapped_inside:
+            wrapped_outside = (
+                doc_text[max(0, start - m):start] == marker
+                and doc_text[end:end + m] == marker
             )
-        elif fmt_type == "italic":
-            fmt.setFontItalic(not fmt.fontItalic())
-        elif fmt_type == "underline":
-            fmt.setFontUnderline(not fmt.fontUnderline())
-        elif fmt_type == "strike":
-            fmt.setFontStrikeOut(not fmt.fontStrikeOut())
+            if wrapped_outside and marker == "*":
+                if doc_text[max(0, start - 2):start] == "**" and doc_text[max(0, start - 3):start] != "***":
+                    wrapped_outside = False
+                elif doc_text[end:end + 2] == "**" and doc_text[end:end + 3] != "***":
+                    wrapped_outside = False
 
-        cursor.mergeCharFormat(fmt)
+        cursor.beginEditBlock()
+        if wrapped_inside:
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(sel[m:-m])
+            new_start, new_end = start, end - 2 * m
+        elif wrapped_outside:
+            cursor.setPosition(start - m)
+            cursor.setPosition(end + m, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(sel)
+            new_start, new_end = start - m, start - m + len(sel)
+        else:
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(f"{marker}{sel}{marker}")
+            new_start, new_end = start + m, start + m + len(sel)
         cursor.endEditBlock()
-        self.text_area.setTextCursor(cursor)
-        self.text_area.setFocus()
+
+        cursor.setPosition(new_start)
+        cursor.setPosition(new_end, QTextCursor.MoveMode.KeepAnchor)
+        ta.setTextCursor(cursor)
+        ta.setFocus()
         self.mark_dirty()
 
     def toggle_header_line(self):

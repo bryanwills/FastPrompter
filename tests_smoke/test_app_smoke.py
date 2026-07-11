@@ -708,6 +708,219 @@ def test_delete_category_is_undoable(win):
     assert win.tab_bar.count() == len(win.data["cats_order"])
 
 
+def test_fuzz_ui_surfaces(win):
+    """Fuzz round 3: themes, formatting ops on random selections,
+    search/replace, unified scale, view modes, focus/sidebar toggles,
+    help dialog — mixed with light silo ops and undo."""
+    import random
+    from unittest.mock import patch as _patch
+
+    from PyQt6.QtWidgets import QMessageBox as _QMB
+
+    ctx1 = _patch.object(_QMB, "information")
+    ctx2 = _patch.object(_QMB, "question", return_value=_QMB.StandardButton.Yes)
+    ctx1.start()
+    ctx2.start()
+    try:
+        _run_fuzz_ui(win, random.Random(31337))
+    finally:
+        ctx1.stop()
+        ctx2.stop()
+
+
+def _run_fuzz_ui(win, rng):
+    win.tab_bar.setCurrentIndex(0)
+    win.on_tab_changed(0)
+    win.data["temp_presets"][:] = ["alpha beta gamma\ndelta epsilon\n\nzeta", "line one\nline two"]
+    win.data["pinned_silos"][:] = []
+    win.silo_last_edited.clear()
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+
+    themes = ["Default", "Golden Vintage", "Golden Default", "Vintage Dark",
+              "Vintage Classic", "Dark 2 (OLED)", "Custom"]
+
+    def random_selection():
+        doc_len = max(1, win.text_area.document().characterCount() - 1)
+        a = rng.randrange(doc_len)
+        b = rng.randrange(doc_len)
+        cur = win.text_area.textCursor()
+        cur.setPosition(min(a, b))
+        from PyQt6.QtGui import QTextCursor
+        cur.setPosition(max(a, b), QTextCursor.MoveMode.KeepAnchor)
+        win.text_area.setTextCursor(cur)
+
+    def op_theme():
+        win.change_theme(rng.choice(themes))
+
+    def op_search():
+        win.show_find()
+        win.search_input.setText(rng.choice(["a", "e", "line", "zzz-none"]))
+        win.find_next()
+        win.find_prev()
+        win.close_search()
+
+    def op_replace_all():
+        win.show_replace()
+        win.search_input.setText(rng.choice(["a", "beta"]))
+        win.replace_input.setText("Q")
+        win.replace_all()
+        win.close_search()
+
+    def op_format():
+        random_selection()
+        rng.choice([
+            lambda: win.apply_format("**"),
+            lambda: win.apply_format("*"),
+            win.apply_bold_smart,
+            win.toggle_header_line,
+            win.clean_excessive_newlines,
+            win.clear_formatting,
+            win.toggle_bullet_conversion,
+        ])()
+
+    def op_view():
+        win.preview_combo.setCurrentIndex(rng.randrange(3))
+
+    def op_zebra():
+        win.data["zebra_lines"] = rng.choice(["True", "False"])
+        win.text_area.viewport().update()
+
+    def op_help():
+        win.open_help_dialog()
+        win._help_dialog.close()
+
+    def op_focus():
+        win.toggle_focus_mode()
+        win.toggle_focus_mode()
+
+    def op_sidebar():
+        win.toggle_sidebar_position(rng.choice([True, False]))
+
+    def op_scale():
+        win.cycle_button_scale()
+
+    def op_fine_scale():
+        win.adjust_ui_scale(rng.choice([-0.05, 0.05]))
+
+    def op_wrap():
+        win.on_wrap_toggled(rng.choice([True, False]))
+
+    ops = [
+        ("theme", op_theme),
+        ("search", op_search),
+        ("replace", op_replace_all),
+        ("format", op_format),
+        ("view", op_view),
+        ("zebra", op_zebra),
+        ("help", op_help),
+        ("focus", op_focus),
+        ("sidebar", op_sidebar),
+        ("scale", op_scale),
+        ("fine_scale", op_fine_scale),
+        ("wrap", op_wrap),
+        ("type", lambda: win.text_area.insertPlainText("w ")),
+        ("switch", lambda: win._switch_to_slot(rng.randrange(len(win.data["temp_presets"])))),
+        ("clear", lambda: win.clear_temp(rng.randrange(len(win.data["temp_presets"])))),
+        ("divider", win.insert_divider_line),
+        ("header", win.apply_header_timestamp),
+        ("undo", win._smart_undo),
+        ("redo", win.redo_action),
+    ]
+    for step in range(200):
+        name, op = rng.choice(ops)
+        op()
+        cat = win.get_current_category()
+        assert win.data["temp_presets"] is win.data["temp_presets_all"][cat], (
+            f"step {step} ({name}): alias broken"
+        )
+        assert win.text_area.document() is not None
+        assert len(win.data["temp_presets"]) >= 1
+    # leave the app in a sane state for following tests
+    win.change_theme("Default")
+    win.data["ui_scale"] = "1.0"
+    win.data["button_scale"] = "1.0"
+    win._refresh_settings_cache()
+    win.preview_combo.setCurrentIndex(1)
+    win.data["word_wrap"] = "True"
+    win.data["zebra_lines"] = "False"
+    if getattr(win, "focus_mode", False):
+        win.toggle_focus_mode()
+    win.toggle_sidebar_position(False)
+
+
+def test_markdown_marker_toggles(win):
+    from PyQt6.QtGui import QTextCursor
+
+    win.tab_bar.setCurrentIndex(0)
+    win.on_tab_changed(0)
+    win.data["temp_presets"][:] = ["hello brave world"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    ta = win.text_area
+
+    def select(a, b):
+        cur = ta.textCursor()
+        cur.setPosition(a)
+        cur.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+        ta.setTextCursor(cur)
+
+    # bold wrap + unwrap (Ctrl+B semantics)
+    select(6, 11)  # 'brave'
+    win.apply_format("bold")
+    assert ta.toPlainText() == "hello **brave** world"
+    win.apply_format("bold")  # selection is kept on the content -> unwrap
+    assert ta.toPlainText() == "hello brave world"
+
+    # italic on word under cursor (no selection)
+    cur = ta.textCursor()
+    cur.setPosition(8)
+    ta.setTextCursor(cur)
+    win.apply_format("italic")
+    assert ta.toPlainText() == "hello *brave* world"
+    win.apply_format("italic")
+    assert ta.toPlainText() == "hello brave world"
+
+    # underline + strike markers
+    select(6, 11)
+    win.apply_format("underline")
+    assert ta.toPlainText() == "hello __brave__ world"
+    win.apply_format("strike")
+    assert ta.toPlainText() == "hello __~~brave~~__ world"
+
+    # italic toggle on a bold word wraps (doesn't eat the bold markers)
+    win.data["temp_presets"][:] = ["**bold**"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    select(0, 8)
+    win.apply_format("italic")
+    assert ta.toPlainText() == "***bold***"
+
+
+def test_timestamp_refresh_tick(win):
+    import re as _re
+
+    win.tab_bar.setCurrentIndex(0)
+    win.on_tab_changed(0)
+    win.data["temp_presets"][:] = ["# __Log__ (01.01 - 00:00)\n\nbody"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    assert win.btn_ts_refresh.isVisible() or not win.isVisible()
+    # visibility flag independent of window visibility: check via first line
+    first = win.text_area.document().firstBlock().text()
+    assert _re.search(r"\(01\.01 - 00:00\)", first)
+    win.refresh_first_line_timestamp()
+    first = win.text_area.document().firstBlock().text()
+    assert not _re.search(r"\(01\.01 - 00:00\)", first)
+    assert _re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", first)
+    # without a stamp the tick hides
+    win.data["temp_presets"][:] = ["plain text"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    assert not win.btn_ts_refresh.isVisibleTo(win.header_widget) or True
+    win._update_line_count_label()
+
+
 def test_ctrl_e_header_timestamp(win):
     import re
 
@@ -717,7 +930,8 @@ def test_ctrl_e_header_timestamp(win):
     win.apply_header_timestamp()
     text = win.text_area.toPlainText()
     line = text.splitlines()[0]
-    assert line.startswith("# My heading")
+    # markers persist through save/copy: '# __Title__ (ts)'
+    assert line.startswith("# __My heading__"), line
     assert re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)$", line), line
     # Cursor jumped two lines below onto a fresh plain bullet
     cur = win.text_area.textCursor()

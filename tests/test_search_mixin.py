@@ -54,7 +54,7 @@ class _MockQTextCursor:
         Document = 0
         BlockUnderCursor = 1
 
-    def __init__(self):
+    def __init__(self, _doc=None):
         self._start = 0
         self._end = 0
         self._text = ""
@@ -373,12 +373,29 @@ class TestReplaceAll:
         # Should not show a message box
         assert _MockQMessageBox._last_info_caption == ""
 
+    @staticmethod
+    def _doc_find_results(m, flags):
+        """Make document.find() yield N matches then a null cursor."""
+        class _Cur:
+            def __init__(self, null):
+                self._null = null
+
+            def isNull(self):
+                return self._null
+
+            def insertText(self, _):
+                pass
+
+        results = [_Cur(False)] * flags + [_Cur(True)]
+        it = iter(results)
+        m.text_area.document().find = MagicMock(side_effect=lambda *_a, **_k: next(it))
+
     def test_shows_count_message(self):
         _MockQMessageBox.reset()
         m = make_search_mixin()
         m.search_input._text = "needle"
         m.replace_input._text = "replacement"
-        m.text_area._find_results = [True, True, True, False]
+        self._doc_find_results(m, 3)
         m.replace_all()
         assert _MockQMessageBox._last_info_caption == "Replace All"
         assert "3" in _MockQMessageBox._last_info_text
@@ -387,7 +404,7 @@ class TestReplaceAll:
         _MockQMessageBox.reset()
         m = make_search_mixin()
         m.search_input._text = "needle"
-        m.text_area._find_results = [False]
+        self._doc_find_results(m, 0)
         m.replace_all()
         assert _MockQMessageBox._last_info_caption == "Replace All"
         assert "0" in _MockQMessageBox._last_info_text

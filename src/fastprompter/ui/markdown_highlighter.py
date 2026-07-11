@@ -35,11 +35,21 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         bold_format.setFontWeight(QFont.Weight.Bold)
         self._highlighting_rules.append((re.compile(r'\*\*.*?\*\*'), bold_format))
 
-        # Italic: *text* or _text_
+        # Underline: __text__ (checked before single-underscore italic)
+        underline_format = QTextCharFormat()
+        underline_format.setFontUnderline(True)
+        self._highlighting_rules.append((re.compile(r'__[^_\n]+__'), underline_format))
+
+        # Strikethrough: ~~text~~
+        strike_format = QTextCharFormat()
+        strike_format.setFontStrikeOut(True)
+        self._highlighting_rules.append((re.compile(r'~~[^~\n]+~~'), strike_format))
+
+        # Italic: *text* or _text_ (single markers only)
         italic_format = QTextCharFormat()
         italic_format.setFontItalic(True)
         self._highlighting_rules.append((re.compile(r'\*(?!\*).*?\*(?!\*)'), italic_format))
-        self._highlighting_rules.append((re.compile(r'\_.*?\_'), italic_format))
+        self._highlighting_rules.append((re.compile(r'(?<!_)_(?!_)[^_\n]+(?<!_)_(?!_)'), italic_format))
 
         # Header 1: # Text
         h1_format = QTextCharFormat()

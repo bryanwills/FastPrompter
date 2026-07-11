@@ -78,20 +78,32 @@ class SearchMixin:
         self.find_next()
 
     def replace_all(self):
-        """Replace all occurrences of search text with replace text."""
+        """Replace all occurrences of search text with replace text.
+
+        Uses one document cursor so the search position always advances
+        past each replacement — this is both correct (the text_area's own
+        cursor was never moved by the old copy-cursor version) and safe
+        when the replacement contains the search term (which otherwise
+        re-matched forever).
+        """
         search_str = self.search_input.text()
         if not search_str:
             return
         replace_str = self.replace_input.text()
-        cursor = self.text_area.textCursor()
-        cursor.beginEditBlock()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-        self.text_area.setTextCursor(cursor)
+        doc = self.text_area.document()
+        edit_cursor = self.text_area.textCursor()
+        edit_cursor.beginEditBlock()
         count = 0
-        while self.text_area.find(search_str):
-            self.text_area.textCursor().insertText(replace_str)
+        find_cur = QTextCursor(doc)
+        while True:
+            find_cur = doc.find(search_str, find_cur)
+            if find_cur.isNull():
+                break
+            find_cur.insertText(replace_str)
+            # find_cur now sits at the end of the inserted text, so the
+            # next search starts after it — no re-match, guaranteed progress
             count += 1
-        cursor.endEditBlock()
+        edit_cursor.endEditBlock()
         QMessageBox.information(self, "Replace All", f"Replaced {count} occurrences.")
 
     def on_search_toggle(self, checked):

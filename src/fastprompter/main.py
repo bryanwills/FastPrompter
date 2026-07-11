@@ -3,6 +3,7 @@ import ctypes
 import ctypes.wintypes
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -546,6 +547,14 @@ class FastPrompter(
 
         # Cursor nav and settings
         self.header_layout.addStretch(1)
+        self.btn_ts_refresh = QPushButton("\u2714")
+        self.btn_ts_refresh.setToolTip(
+            "First line carries a Ctrl+E timestamp.\nClick to refresh it to right now."
+        )
+        self.apply_button_size(self.btn_ts_refresh, 24, 24)
+        self.btn_ts_refresh.clicked.connect(self.refresh_first_line_timestamp)
+        self.btn_ts_refresh.hide()
+        self.header_layout.addWidget(self.btn_ts_refresh)
         self.lbl_line_count = QLabel("")
         self.lbl_line_count.setToolTip("Line count of the open silo/snippet")
         self.lbl_line_count.setStyleSheet("padding: 0 4px; font-weight: bold;")
@@ -1286,18 +1295,21 @@ class FastPrompter(
 
         cursor.insertText(new_text)
 
-        # Apply bold + underline formatting
+        # Bold + underline via markdown markers (survive save/copy):
+        # '# __**Title**__ (ts)'. The # header renders bold via the
+        # highlighter; __..__ adds the underline.
         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-        fmt = cursor.charFormat()
-        fmt.setFontWeight(QFont.Weight.Bold)
-        fmt.setFontUnderline(True)
-        cursor.mergeCharFormat(fmt)
+        line = cursor.selectedText()
+        m = re.match(r"^(#\s+)(.*?)(\s*\(\d{2}\.\d{2} - \d{2}:\d{2}\))?\s*$", line)
+        if m:
+            prefix, content, ts_part = m.group(1), m.group(2).strip(), m.group(3) or ""
+            if content and not (content.startswith("__") and content.endswith("__")):
+                cursor.insertText(f"{prefix}__{content}__{ts_part}")
 
         # Append (DD.MM - hh:mm) timestamp at end of line, unless one is already there
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
         import datetime
-        import re
 
         if not re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)\s*$", cursor.block().text()):
             ts = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
@@ -1471,7 +1483,10 @@ class FastPrompter(
         # activation-change would trigger the click-out auto-hide and make
         # the toggle look broken. Suppress it until the dust settles.
         self.ignore_focus_loss = True
+        geo = self.geometry()
+        self.hide()  # explicit hide forces a clean native-frame rebuild
         self.setWindowFlags(flags)
+        self.setGeometry(geo)
         if was_visible:
             self.show()
             self.raise_()
@@ -3037,6 +3052,12 @@ class FastPrompter(
         QShortcut(QKeySequence("Ctrl+Alt+Shift+Q"), self).activated.connect(self.quit_app)
         QShortcut(QKeySequence("Ctrl+E"), self).activated.connect(self.apply_header_timestamp)
         QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self.apply_bold_smart)
+        QShortcut(QKeySequence("Ctrl+I"), self).activated.connect(
+            lambda: self.apply_format("italic"))
+        QShortcut(QKeySequence("Ctrl+U"), self).activated.connect(
+            lambda: self.apply_format("underline"))
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(
+            lambda: self.apply_format("strike"))
 
     def fire_shortcut(self, idx):
         self.play_sound("snippet")
@@ -3118,6 +3139,8 @@ class FastPrompter(
 
         self.snap_index = (self.snap_index + 1) % 4
 
+    _TS_RE = None  # compiled lazily below
+
     def _update_line_count_label(self):
         lbl = getattr(self, "lbl_line_count", None)
         if lbl is None or sip.isdeleted(lbl):
@@ -3125,6 +3148,30 @@ class FastPrompter(
         doc = self.text_area.document()
         lines = doc.blockCount() if doc.characterCount() > 1 else 0
         lbl.setText(f"{lines} L" if lines else "")
+        btn = getattr(self, "btn_ts_refresh", None)
+        if btn is not None and not sip.isdeleted(btn):
+            first = doc.firstBlock().text()
+            btn.setVisible(bool(re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", first)))
+
+    def refresh_first_line_timestamp(self):
+        """Replace the first line's (DD.MM - hh:mm) stamp with right now."""
+        import datetime
+
+        doc = self.text_area.document()
+        block = doc.firstBlock()
+        m = re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", block.text())
+        if not m:
+            return
+        now = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
+        cur = self.text_area.textCursor()
+        keep = cur.position()
+        cur.setPosition(block.position() + m.start())
+        cur.setPosition(block.position() + m.end(), QTextCursor.MoveMode.KeepAnchor)
+        cur.insertText(now)
+        cur.setPosition(min(keep, doc.characterCount() - 1))
+        self.text_area.setTextCursor(cur)
+        self.play_tick_sound()
+        self.mark_dirty()
 
     def _on_text_changed(self):
         self._last_text_edit_time = self._bump_action_seq()

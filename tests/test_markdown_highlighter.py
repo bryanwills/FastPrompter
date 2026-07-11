@@ -32,6 +32,9 @@ class _MockQTextCharFormat:
     def setFontItalic(self, v):
         self._font_italic = v
 
+    def setFontStrikeOut(self, v):
+        self._font_strikeout = v
+
     def setProperty(self, key, value):
         self._properties[key] = value
 
@@ -164,8 +167,8 @@ class TestInit:
 
     def test_rules_populated_after_init(self):
         h = make_highlighter()
-        assert len(h._highlighting_rules) == 14, (
-            f"Expected 14 rules (bold, italic x2, h1-h3, code, quote, link, "
+        assert len(h._highlighting_rules) == 16, (
+            f"Expected 16 rules (underline, strike, bold, italic x2, h1-h3, code, quote, link, "
             f"hr, cb_unchecked, cb_checked, bullet list, numbered list), got {len(h._highlighting_rules)}"
         )
 
@@ -195,8 +198,8 @@ class TestUpdateBaseSize:
         h = make_highlighter(11)
         h.update_base_size(16)
         assert len(h._highlighting_rules) > 0
-        # Header rule at index 3 should reflect new size (H1)
-        h1_rule = h._highlighting_rules[3]
+        # Header rule (H1) — index 5 after bold/underline/strike/italic x2
+        h1_rule = h._highlighting_rules[5]
         fmt = h1_rule[1]
         assert fmt._properties.get(_MockQTextFormat.Property.FontPointSize) == 16 * 1.5
 
