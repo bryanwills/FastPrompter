@@ -14,6 +14,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QTextEdit, QWidget
 
+TS_STAMP_LINE_RE = re.compile(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)\s*$")
+
 
 def _draw_horizontal_rule(painter, hr_color, y_pos, width):
     """Draw a horizontal rule line at the given y position."""
@@ -199,6 +201,30 @@ class VaultTextEdit(QTextEdit):
                 break
             block = block.next()
 
+    def _ts_glyph_rect(self, block):
+        """Rect of the inline timestamp-refresh glyph for a stamped line."""
+        if not TS_STAMP_LINE_RE.search(block.text()):
+            return None
+        cur = QTextCursor(block)
+        cur.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        r = self.cursorRect(cur)
+        size = max(14, r.height() - 2)
+        return QRect(r.right() + 6, r.top() + (r.height() - size) // 2, size, size)
+
+    def _ts_glyph_block_at(self, pos):
+        """Return the block whose refresh glyph contains pos, else None."""
+        block = self._first_visible_block()
+        vp_h = self.viewport().height()
+        while block is not None and block.isValid():
+            r = self.cursorRect(QTextCursor(block))
+            if r.top() > vp_h:
+                break
+            g = self._ts_glyph_rect(block)
+            if g is not None and g.contains(pos):
+                return block
+            block = block.next()
+        return None
+
     def _checkbox_at_pos(self, pos):
         try:
             if not self._doc_has_checkbox:
@@ -256,6 +282,11 @@ class VaultTextEdit(QTextEdit):
             return
         try:
             if event.button() == Qt.MouseButton.LeftButton:
+                ts_block = self._ts_glyph_block_at(event.pos())
+                if ts_block is not None:
+                    self.main_win.refresh_timestamp_in_block(ts_block)
+                    event.accept()
+                    return
                 cb_block = self._checkbox_at_pos(event.pos())
                 if cb_block:
                     self._toggle_single_line(cb_block)
@@ -578,6 +609,18 @@ class VaultTextEdit(QTextEdit):
                         if zebra_enabled and bnum % 2 == 1:
                             line_rect = QRectF(0, br.top(), vp_rect.width(), br.height())
                             painter.fillRect(line_rect, zebra_odd)
+
+                        # Inline refresh glyph after lines ending with a
+                        # Ctrl+E timestamp: click it to re-stamp to now
+                        if not is_large and TS_STAMP_LINE_RE.search(text):
+                            g = self._ts_glyph_rect(block)
+                            if g is not None:
+                                painter.setPen(QColor("#D9B340"))
+                                gf = self.font()
+                                gf.setPointSizeF(max(8.0, gf.pointSizeF() * 0.9))
+                                painter.setFont(gf)
+                                painter.drawText(g, Qt.AlignmentFlag.AlignCenter, "\u27f3")
+                                painter.setFont(self.font())
 
                         # --- horizontal rule visual line (skip for large docs)
                         if not is_large and re.match(r'^[-*_]{3,}$', text.strip()):

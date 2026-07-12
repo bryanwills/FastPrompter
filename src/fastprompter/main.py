@@ -547,14 +547,6 @@ class FastPrompter(
 
         # Cursor nav and settings
         self.header_layout.addStretch(1)
-        self.btn_ts_refresh = QPushButton("\u2714")
-        self.btn_ts_refresh.setToolTip(
-            "First line carries a Ctrl+E timestamp.\nClick to refresh it to right now."
-        )
-        self.apply_button_size(self.btn_ts_refresh, 24, 24)
-        self.btn_ts_refresh.clicked.connect(self.refresh_first_line_timestamp)
-        self.btn_ts_refresh.hide()
-        self.header_layout.addWidget(self.btn_ts_refresh)
         self.lbl_line_count = QLabel("")
         self.lbl_line_count.setToolTip("Line count of the open silo/snippet")
         self.lbl_line_count.setStyleSheet("padding: 0 4px; font-weight: bold;")
@@ -1295,24 +1287,19 @@ class FastPrompter(
 
         cursor.insertText(new_text)
 
-        # Bold + underline via markdown markers (survive save/copy):
-        # '# __**Title**__ (ts)'. The # header renders bold via the
-        # highlighter; __..__ adds the underline.
-        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-        line = cursor.selectedText()
-        m = re.match(r"^(#\s+)(.*?)(\s*\(\d{2}\.\d{2} - \d{2}:\d{2}\))?\s*$", line)
-        if m:
-            prefix, content, ts_part = m.group(1), m.group(2).strip(), m.group(3) or ""
-            if content and not (content.startswith("__") and content.endswith("__")):
-                cursor.insertText(f"{prefix}__{content}__{ts_part}")
-
-        # Append (DD.MM - hh:mm) timestamp at end of line, unless one is already there
+        # Append (DD.MM - hh:mm) at end of line; if the line already has a
+        # stamp, refresh it in place (title untouched)
         cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
         import datetime
 
-        if not re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)\s*$", cursor.block().text()):
-            ts = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
+        ts = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
+        block = cursor.block()
+        m = re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", block.text())
+        if m:
+            cursor.setPosition(block.position() + m.start())
+            cursor.setPosition(block.position() + m.end(), QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(ts)
+        else:
             cursor.insertText(f" {ts}")
 
         # Jump two lines below the header onto a fresh bullet, with PLAIN
@@ -3148,21 +3135,17 @@ class FastPrompter(
         doc = self.text_area.document()
         lines = doc.blockCount() if doc.characterCount() > 1 else 0
         lbl.setText(f"{lines} L" if lines else "")
-        btn = getattr(self, "btn_ts_refresh", None)
-        if btn is not None and not sip.isdeleted(btn):
-            first = doc.firstBlock().text()
-            btn.setVisible(bool(re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", first)))
 
-    def refresh_first_line_timestamp(self):
-        """Replace the first line's (DD.MM - hh:mm) stamp with right now."""
+    def refresh_timestamp_in_block(self, block):
+        """Replace a line's (DD.MM - hh:mm) stamp with right now — used by
+        the inline refresh glyph painted after stamped lines."""
         import datetime
 
-        doc = self.text_area.document()
-        block = doc.firstBlock()
         m = re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", block.text())
         if not m:
             return
         now = datetime.datetime.now().strftime("(%d.%m - %H:%M)")
+        doc = self.text_area.document()
         cur = self.text_area.textCursor()
         keep = cur.position()
         cur.setPosition(block.position() + m.start())

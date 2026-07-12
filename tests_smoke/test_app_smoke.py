@@ -897,28 +897,41 @@ def test_markdown_marker_toggles(win):
     assert ta.toPlainText() == "***bold***"
 
 
-def test_timestamp_refresh_tick(win):
+def test_inline_timestamp_refresh_glyph(win):
     import re as _re
+
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QMouseEvent
 
     win.tab_bar.setCurrentIndex(0)
     win.on_tab_changed(0)
-    win.data["temp_presets"][:] = ["# __Log__ (01.01 - 00:00)\n\nbody"]
+    win.data["temp_presets"][:] = ["# Log (01.01 - 00:00)\n\nbody"]
     win.silo_docs[:] = []
     win._switch_to_slot(0, initial=True)
-    assert win.btn_ts_refresh.isVisible() or not win.isVisible()
-    # visibility flag independent of window visibility: check via first line
-    first = win.text_area.document().firstBlock().text()
-    assert _re.search(r"\(01\.01 - 00:00\)", first)
-    win.refresh_first_line_timestamp()
-    first = win.text_area.document().firstBlock().text()
-    assert not _re.search(r"\(01\.01 - 00:00\)", first)
+    ta = win.text_area
+    block = ta.document().firstBlock()
+    # the stamped line exposes an inline refresh glyph right after the text
+    rect = ta._ts_glyph_rect(block)
+    assert rect is not None
+    # a real click on the glyph re-stamps the line to now
+    center = rect.center()
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        center.toPointF() if hasattr(center, "toPointF") else center,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    ta.mousePressEvent(ev)
+    first = ta.document().firstBlock().text()
+    assert "(01.01 - 00:00)" not in first
     assert _re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)", first)
-    # without a stamp the tick hides
+    assert first.startswith("# Log ")
+    # plain lines get no glyph
     win.data["temp_presets"][:] = ["plain text"]
     win.silo_docs[:] = []
     win._switch_to_slot(0, initial=True)
-    assert not win.btn_ts_refresh.isVisibleTo(win.header_widget) or True
-    win._update_line_count_label()
+    assert ta._ts_glyph_rect(ta.document().firstBlock()) is None
 
 
 def test_ctrl_e_header_timestamp(win):
@@ -930,8 +943,7 @@ def test_ctrl_e_header_timestamp(win):
     win.apply_header_timestamp()
     text = win.text_area.toPlainText()
     line = text.splitlines()[0]
-    # markers persist through save/copy: '# __Title__ (ts)'
-    assert line.startswith("# __My heading__"), line
+    assert line.startswith("# My heading"), line
     assert re.search(r"\(\d{2}\.\d{2} - \d{2}:\d{2}\)$", line), line
     # Cursor jumped two lines below onto a fresh plain bullet
     cur = win.text_area.textCursor()
@@ -939,15 +951,34 @@ def test_ctrl_e_header_timestamp(win):
     assert cur.block().text() == "\u2022 "
     fmt = win.text_area.currentCharFormat()
     assert fmt.fontWeight() < 700 and not fmt.fontUnderline()
-    # Press again ON the header line: no duplicate header/timestamp,
-    # no extra blank lines, cursor jumps below again
+    # Press again ON the header line: title untouched, stamp REFRESHED
+    # in place (no duplicates), no extra blank lines, cursor jumps below
     back = win.text_area.textCursor()
     back.setPosition(0)
     win.text_area.setTextCursor(back)
     win.apply_header_timestamp()
-    text2 = win.text_area.toPlainText()
-    assert text2 == text
+    line2 = win.text_area.toPlainText().splitlines()[0]
+    assert line2.startswith("# My heading"), line2
+    assert line2.count("(") == 1  # exactly one stamp
+    assert win.text_area.toPlainText().count("\n") == text.count("\n")
     assert win.text_area.textCursor().blockNumber() == 2
+
+
+def test_ctrl_e_refreshes_stale_stamp_in_place(win):
+    win.tab_bar.setCurrentIndex(0)
+    win.on_tab_changed(0)
+    win.data["temp_presets"][:] = ["# Journal (01.01 - 00:00)\n\n\u2022 old entry"]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    cur = win.text_area.textCursor()
+    cur.setPosition(0)
+    win.text_area.setTextCursor(cur)
+    win.apply_header_timestamp()
+    line = win.text_area.toPlainText().splitlines()[0]
+    assert line.startswith("# Journal ("), line
+    assert "(01.01 - 00:00)" not in line  # stamp replaced, not duplicated
+    assert line.count("(") == 1
+    assert "\u2022 old entry" in win.text_area.toPlainText()
 
 
 def test_transfer_to_snippet_target_category(win):
