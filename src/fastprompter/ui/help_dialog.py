@@ -35,7 +35,7 @@ def build_help_html(data) -> str:
         ("Ctrl+1&ndash;Ctrl+0", "Jump to silo 1&ndash;10"),
         ("F1&ndash;F10", "Paste snippet 1&ndash;10 into the editor"),
         ("Ctrl+S", "Save text as snippet / update the edited snippet"),
-        ("Ctrl+W", "Insert a --- divider line with smart spacing"),
+        ("Ctrl+W", "Insert a spaced --- divider and start a fresh bullet"),
         ("Ctrl+E", "Header the line: # + bold + underline + timestamp, "
                    "then jump 2 lines down onto a fresh &bull; bullet"),
         ("Ctrl+Return", "Toggle [ ] checkboxes on the line / selection"),

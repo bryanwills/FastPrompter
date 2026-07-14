@@ -212,21 +212,23 @@ class FormattingMixin:
         self.mark_dirty()
 
     def insert_add_line(self):
-        """Insert a horizontal markdown divider line (---) with smart spacing.
+        """Insert a horizontal markdown divider line (---) with smart spacing,
+        landing on a fresh bullet ready to type.
 
         If called mid-line or on a non-empty line, jumps to the end first.
-        Inserts \n\n---\n\n and positions cursor on a fresh line ready to type.
+        Inserts \\n\\n---\\n\\n\\n•  and positions the cursor right after the bullet.
         """
         cursor = self.text_area.textCursor()
         cursor.beginEditBlock()
         block = cursor.block()
         if cursor.positionInBlock() > 0 or block.text().strip():
             cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-        cursor.insertText("\n\n---\n\n")
+        cursor.insertText("\n\n---\n\n\n• ")
         cursor.endEditBlock()
         self.text_area.setTextCursor(cursor)
         self.text_area.ensureCursorVisible()
         self.text_area.setFocus()
+        self.mark_dirty()
         self.mark_dirty()
 
     def simple_markdown_to_html(self, text):

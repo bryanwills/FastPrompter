@@ -176,7 +176,39 @@ def test_insert_divider_line_smart(win):
     cursor.setPosition(5)  # mid-line
     win.text_area.setTextCursor(cursor)
     win.insert_divider_line()
-    assert "hello world\n\n---\n\n" in win.text_area.toPlainText()
+    text = win.text_area.toPlainText()
+    assert text == "hello world\n\n---\n\n\n• "
+    # cursor lands right after the bullet, ready to type
+    cur = win.text_area.textCursor()
+    assert not cur.hasSelection()
+    assert cur.position() == len(text)
+
+
+def test_insert_divider_line_and_toolbar_button_share_one_implementation(win):
+    # insert_add_line (toolbar "Line" button) and insert_divider_line
+    # (Ctrl+W) must never diverge again -- one is a thin alias of the other
+    win.data["temp_presets"] = [""]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    win.insert_add_line()
+    from_toolbar = win.text_area.toPlainText()
+    win.data["temp_presets"] = [""]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    win.insert_divider_line()
+    from_shortcut = win.text_area.toPlainText()
+    assert from_toolbar == from_shortcut == "\n\n---\n\n\n• "
+
+
+def test_insert_add_line_marks_dirty(win):
+    # Regression: the toolbar entry point used to skip mark_dirty(),
+    # silently risking the divider not being saved
+    win.data["temp_presets"] = [""]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    win.state._db_dirty = False
+    win.insert_add_line()
+    assert win.state._db_dirty is True
 
 
 def test_auto_bullet_space_and_enter(win):

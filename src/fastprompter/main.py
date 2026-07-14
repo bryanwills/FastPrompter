@@ -425,7 +425,9 @@ class FastPrompter(
         self.btn_end.clicked.connect(self.move_cursor_end)
 
         self.btn_add_line = QPushButton("Line")
-        self.btn_add_line.setToolTip("Insert Line\nInsert a horizontal markdown line (---).")
+        self.btn_add_line.setToolTip(
+            "Insert Line (Ctrl+W)\nInsert a spaced --- divider and start a fresh bullet."
+        )
         self.apply_button_size(self.btn_add_line, 24)
         self.btn_add_line.clicked.connect(self.insert_add_line)
 
@@ -2958,27 +2960,10 @@ class FastPrompter(
                 clip.setText(text)
 
     def insert_divider_line(self):
-        """Ctrl+W: Insert a markdown divider line (---) with smart spacing.
-
-        If called mid-line or on a non-empty line, jumps to the end first.
-        Inserts \\n\\n---\\n\\n and positions cursor on a fresh line ready to type.
-        """
-        cursor = self.text_area.textCursor()
-        cursor.beginEditBlock()
-
-        # Smart: if mid-line or on a non-empty line, jump to end first
-        block = cursor.block()
-        if cursor.positionInBlock() > 0 or block.text().strip():
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-
-        # Insert divider with generous spacing
-        cursor.insertText("\n\n---\n\n")
-
-        cursor.endEditBlock()
-        self.text_area.setTextCursor(cursor)
-        self.text_area.ensureCursorVisible()
-        self.text_area.setFocus()
-        self.mark_dirty()
+        """Ctrl+W: alias for the toolbar's Insert Line command — single
+        implementation lives in FormattingMixin.insert_add_line so the two
+        entry points can never silently diverge again."""
+        self.insert_add_line()
 
     def auto_paste(self, text):
         if not text.strip():
