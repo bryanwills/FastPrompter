@@ -1,5 +1,4 @@
 ## DOING
-- [ ] T-011 REVIEW wave diff + ship v0.4.0 (build EXE, GitHub release) | verify: release URL live
 
 ## TODO
 
@@ -14,3 +13,4 @@
 - [x] T-008 Divider spacing spins 0-6/1-6 (verified: test_divider_spacing_configurable PASS, conf: high)
 - [x] T-009 Antigravity work verified: date clock hh:mm:ss + ss toggle, right-click auto-bullet, pinned gap toggle (verified: 58 smoke PASS, conf: high)
 - [x] T-010 File container per silo: file_container.py panel, drop/drag/preview/export, folder per title slug, hover 📁 + header 📁, help updated (verified: 3 smoke tests PASS, conf: high — drag-out/os.startfile MANUAL-VERIFY)
+- [x] T-011 REVIEW + ship v0.4.0 (verified: release URL live, EXE 26.5 MB uploaded, conf: high)

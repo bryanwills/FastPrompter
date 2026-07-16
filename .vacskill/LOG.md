@@ -21,3 +21,6 @@
 - 16.07.26 20:54 [T-010] RUN: MANUAL-VERIFY drag-out to Explorer + os.startfile open; offscreen Qt so mouse untestable
 - 16.07.26 20:54 [T-010] DEC: no DB for files, folder IS the container -> KNOWLEDGE/decisions.md
 - 16.07.26 21:05 [T-011] DEC: REVIEW -> SHIP; P0 fixed: Enter-on--- hardcoded divider diverged from spins, unified via divider_counts()
+- 16.07.26 21:24 [T-011] RUN: ship v0.4.0 -> pushed 110df63, tag v0.4.0, EXE 26.5MB uploaded, release live
+- 16.07.26 21:25 [--] H: cmd release.cmd в фоне терял cwd -> confirmed, абсолютный путь лечит
+- 16.07.26 21:25 [--] сило теперь с амбаром / файлы лежат как зерно / дед доволен, спит
