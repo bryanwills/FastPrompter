@@ -15,8 +15,7 @@ One hotkey. Instant window. Your prompts, notes and drafts — always one keystr
 
 <br>
 
-<img width="959" height="540" alt="clipboard_20260717_080637_7ccad155" src="https://github.com/user-attachments/assets/78b5585f-43e7-466a-a0f8-29caef855d72" />
-
+<img width="960" height="540" alt="clipboard_20260717_085614_38a3b3de" src="https://github.com/user-attachments/assets/728fb3ec-a5e5-44bf-b8b4-3ec9b4cee74a" />
 
 </div>
 
@@ -57,18 +56,19 @@ Press `Alt+X` anywhere — in your browser, IDE, terminal — and FastPrompter p
 ## 📸 Screenshots
 
 <div align="center">
-<img width="960" height="540" alt="clipboard_20260717_042040_f5e84a12" src="https://github.com/user-attachments/assets/898662fc-27c6-4b07-b450-b8c8929c0d7f" />
-<img width="960" height="540" alt="clipboard_20260717_042030_1136f6e9" src="https://github.com/user-attachments/assets/b688fce7-e4f9-433f-b6f7-5362a550b3ca" />
+<img width="960" height="540" alt="clipboard_20260717_085619_fc657a3c" src="https://github.com/user-attachments/assets/9634037a-d3b2-4119-9e36-0be7ecc2a589" />
+<img width="959" height="539" alt="clipboard_20260717_085639_d6aa4640" src="https://github.com/user-attachments/assets/7762e459-50c8-4f98-b37e-5e55fe2e478d" />
 </div>
 
 <details>
 <summary><b>More screenshots</b></summary>
 <div align="center">
-<img width="960" height="540" alt="clipboard_20260717_031914_9e476bc9" src="https://github.com/user-attachments/assets/62ac5453-c34c-4d6a-93a6-bd12f1bcd240" />
-<img width="960" height="540" alt="clipboard_20260717_031948_d5341624" src="https://github.com/user-attachments/assets/d8b36e68-d549-47b2-bb4f-9bcfc3a8f8e9" />
-<img width="961" height="537" alt="clipboard_20260717_042400_87a93417" src="https://github.com/user-attachments/assets/62b7ced9-85cb-4784-8dea-b9b227bb4fc3" />
-<img width="352" height="271" alt="clipboard_20260717_042103_08712286" src="https://github.com/user-attachments/assets/527405b2-a4cd-4db3-8a3f-8224864b1864" />
-<img width="954" height="656" alt="clipboard_20260717_042051_1220c8f2" src="https://github.com/user-attachments/assets/1350a5ec-c3c6-4205-b6ee-4d8be278e731" />
+<img width="428" height="351" alt="clipboard_20260717_085648_8a862e81" src="https://github.com/user-attachments/assets/31ace5ca-e1ec-414e-9b22-8986b83e6557" />
+<img width="960" height="540" alt="clipboard_20260717_085753_bedafc9b" src="https://github.com/user-attachments/assets/fe691c5a-8ea2-447e-af71-81e789b20492" />
+<img width="960" height="540" alt="clipboard_20260717_085756_24205876" src="https://github.com/user-attachments/assets/4995364c-a017-4f49-b296-71df9d59df4f" />
+<img width="960" height="540" alt="clipboard_20260717_085759_5c027b92" src="https://github.com/user-attachments/assets/64fa4aa7-9abd-4703-b996-c7fe0807de1c" />
+<img width="960" height="540" alt="clipboard_20260717_085806_c8b01cc2" src="https://github.com/user-attachments/assets/7e893326-eeed-4246-8862-e9e1d9b024f0" />
+<img width="960" height="540" alt="clipboard_20260717_085809_5ad51055" src="https://github.com/user-attachments/assets/e9bcab22-404d-49c6-ab67-d8cf13aeb767" />
 
 </div>
 </details>
