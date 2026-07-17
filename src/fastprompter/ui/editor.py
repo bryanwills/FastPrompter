@@ -13,6 +13,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QApplication, QTextEdit, QWidget
 
+from fastprompter.core.logging import logger
+
 # Matches every stamp shape Ctrl+E ever wrote: "17.07 - 04:19",
 # "17 Jul - 04:19", optional seconds, optional day-part word prefix.
 # The refresh glyph lives on this regex — a stamp format added in
@@ -491,7 +493,7 @@ class VaultTextEdit(QTextEdit):
                             return block
                 block = block.next()
         except Exception as e:
-            print("checkbox hit test error:", e)
+            logger.debug(f"checkbox hit test error: {e}")
         return None
 
     def _toggle_single_line(self, block):
@@ -510,7 +512,7 @@ class VaultTextEdit(QTextEdit):
             bcursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
             bcursor.insertText(new_text)
         except Exception as e:
-            print("checkbox toggle error:", e)
+            logger.debug(f"checkbox toggle error: {e}")
 
     def mousePressEvent(self, event):
         if sip.isdeleted(self):
@@ -550,7 +552,7 @@ class VaultTextEdit(QTextEdit):
                         event.accept()
                         return
         except Exception as e:
-            print("checkbox mouse error:", e)
+            logger.debug(f"checkbox mouse error: {e}")
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             super().mousePressEvent(event)
             cursor = self.textCursor()
@@ -627,7 +629,7 @@ class VaultTextEdit(QTextEdit):
                     if cur.shape() != target:
                         self.viewport().setCursor(target)
         except Exception as e:
-            print("checkbox cursor error:", e)
+            logger.debug(f"checkbox cursor error: {e}")
         if event.buttons() & Qt.MouseButton.RightButton and self._right_drag_start is not None:
             delta = event.globalPosition().toPoint() - self._right_drag_start
             if not self._dragged and delta.manhattanLength() > 3:

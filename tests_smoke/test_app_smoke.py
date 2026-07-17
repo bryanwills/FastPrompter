@@ -1206,6 +1206,97 @@ def test_file_container_import_export_delete(win):
     panel.close()
 
 
+def test_drop_overlay_zones_and_routing(win):
+    from PyQt6.QtCore import QPoint
+
+    ta = win.text_area
+    ov = ta._drop_overlay()
+    # two zones for text files: top = text, bottom = files
+    ov.begin(two_zones=True)
+    assert not ov.isHidden()
+    h = ov.height()
+    assert ov.zone_at(QPoint(10, 5)) == "text"
+    assert ov.zone_at(QPoint(10, h - 5)) == "files"
+    ov.track(QPoint(10, h - 5))
+    assert ov._hot == "files"
+    # single zone for binary-only drags
+    ov.begin(two_zones=False)
+    assert ov.zone_at(QPoint(10, 5)) == "files"
+    ov.end()
+    assert ov.isHidden()
+
+    # routing: text zone inserts content, files zone goes to the container
+    win.data["temp_presets"][:] = [""]
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    src = os.path.join(_tmpdir, "routed.txt")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write("routed text")
+    ta._drop_paths([src], "text")
+    assert "routed text" in ta.toPlainText()
+    sent = []
+    win.add_files_to_active_silo = lambda paths: sent.extend(paths)
+    ta._drop_paths([src], "files")
+    assert sent == [src]
+    del win.__dict__["add_files_to_active_silo"]
+
+
+def test_trash_silo_writes_md_and_removes_slot(win):
+    root = os.path.join(_tmpdir, "files_root_trash2")
+    win._files_root = lambda: root
+    win.tab_bar.setCurrentIndex(0)
+    win.on_tab_changed(0)
+    win.data["temp_presets"][:] = ["# Doomed Silo\nprecious text", "stays"]
+    win.data["pinned_silos"][:] = []
+    win.data["silo_ticked"][:] = []
+    win.silo_docs[:] = []
+    win._switch_to_slot(0, initial=True)
+    win.trash_silo(0)
+    assert win.data["temp_presets"] == ["stays"]
+    trash = os.path.join(root, "_trash")
+    mds = [n for n in os.listdir(trash) if n.startswith("doomed-silo") and n.endswith(".md")]
+    assert len(mds) == 1
+    with open(os.path.join(trash, mds[0]), encoding="utf-8") as f:
+        assert "precious text" in f.read()
+    del win.__dict__["_files_root"]
+
+
+def test_hide_on_clickout_toggle_and_header_mirrors(win):
+    before = win.cb_focus.isChecked()
+    win.toggle_hide_on_clickout()
+    assert win.cb_focus.isChecked() != before
+    win.toggle_hide_on_clickout()
+    assert win.cb_focus.isChecked() == before
+
+    # header 📌 / # buttons mirror their checkboxes both ways
+    win.cb_top.setChecked(True)
+    assert win.btn_pin_top.isChecked() is True
+    win.cb_top.setChecked(False)
+    assert win.btn_pin_top.isChecked() is False
+    win.btn_line_nums.setChecked(True)
+    assert win.cb_line_numbers.isChecked() is True
+    win.btn_line_nums.setChecked(False)
+    assert win.cb_line_numbers.isChecked() is False
+
+
+def test_theme_switch_keeps_button_labels(win):
+    win.data["theme"] = "Default"
+    win.apply_theme()
+    win._header_dense = None
+    win._apply_header_density()
+    assert win.btn_copy.text() in ("Copy", "Copy")
+    win.data["theme"] = "OLED" if "OLED" in __import__("fastprompter.theme.themes", fromlist=["THEMES"]).THEMES else "Default"
+    win.apply_theme()
+    win._header_dense = None
+    win._apply_header_density()
+    # labels survive the repack — no truncation to fixed stale widths
+    assert win.btn_copy.text()
+    assert win.btn_clear.text()
+    assert win.btn_save.minimumWidth() <= max(1, win.btn_save.fontMetrics().horizontalAdvance(win.btn_save.text()) + 8)
+    win.data["theme"] = "Default"
+    win.apply_theme()
+
+
 def test_silo_tick_toggle_persists_and_remaps(win):
     win.tab_bar.setCurrentIndex(0)
     win.on_tab_changed(0)
