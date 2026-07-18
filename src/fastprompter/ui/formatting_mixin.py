@@ -225,10 +225,13 @@ class FormattingMixin:
         """
         cursor = self.text_area.textCursor()
         original_pos = cursor.position()
+        # beginEditBlock MUST balance endEditBlock — an unbalanced end
+        # corrupts the document's edit-block counter and freezes rendering
+        cursor.beginEditBlock()
         cursor.insertText("\n\n\n\n\n---\n")
+        cursor.endEditBlock()
         cursor.setPosition(original_pos)
         self.text_area.setTextCursor(cursor)
-        cursor.endEditBlock()
         self.text_area.ensureCursorVisible()
         self.text_area.setFocus()
         self.mark_dirty()
@@ -239,6 +242,7 @@ class FormattingMixin:
         """
         before, after = self.divider_counts()
         cursor = self.text_area.textCursor()
+        cursor.beginEditBlock()
         block = cursor.block()
         if cursor.positionInBlock() > 0 or block.text().strip():
             cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
@@ -247,7 +251,6 @@ class FormattingMixin:
         self.text_area.setTextCursor(cursor)
         self.text_area.ensureCursorVisible()
         self.text_area.setFocus()
-        self.mark_dirty()
         self.mark_dirty()
 
     def simple_markdown_to_html(self, text):

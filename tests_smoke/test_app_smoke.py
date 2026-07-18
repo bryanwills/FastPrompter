@@ -1695,6 +1695,31 @@ def test_file_container_button_wired(win):
     assert win.silo_buttons[0]._btn_files.toolTip().startswith("Files")
 
 
+def test_divider_commands_balanced_edit_blocks(win):
+    # Regression: Ctrl+W / Alt+W called endEditBlock() with no matching
+    # beginEditBlock(), corrupting the doc counter and freezing rendering.
+    ta = win.text_area
+    doc = ta.document()
+
+    ta.setPlainText("hello")
+    win.insert_divider_line()  # Ctrl+W
+    assert "---" in ta.toPlainText()
+    doc.undo()  # a balanced edit block undoes in exactly one step
+    assert ta.toPlainText() == "hello"
+
+    ta.setPlainText("world")
+    win.insert_old_add_line()  # Alt+W
+    t = ta.toPlainText()
+    assert "---" in t and "•" in t
+    doc.undo()
+    assert ta.toPlainText() == "world"
+
+    # rendering still live afterwards (gutter reacts to a code fence)
+    ta.setPlainText("```python\nx=1\n```")
+    ta._refresh_checkbox_flag()
+    assert ta.line_number_area_width() > 0
+
+
 def test_toolbar_reorder_persists_and_self_heals(win):
     def layout_tokens():
         out = []
@@ -2034,8 +2059,8 @@ def test_no_cyrillic_in_codebase():
         for f in glob.glob(os.path.join(root, pattern), recursive=True):
             if "__pycache__" in f:
                 continue
-            # translations.py is the RU/EN dictionary — Cyrillic is its job
-            if os.path.basename(f) == "translations.py":
+            # translation files hold the RU dictionary — Cyrillic is their job
+            if "translations" in f.replace("\\", "/"):
                 continue
             with open(f, encoding="utf-8") as fh:
                 for i, line in enumerate(fh, 1):
