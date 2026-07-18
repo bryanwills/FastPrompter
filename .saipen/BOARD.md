@@ -296,3 +296,14 @@ already-handled, or theoretical (won't-fix without a repro).
 | T-210 | DONE (verified) | Sidebar per-side width already works (antigravity); locked with test_sidebar_width_saved_per_side |
 | T-211 | FIXED | HUNT found 3 real unbalanced endEditBlock() freeze bugs (same class as Ctrl+W): toggle_bullet_conversion (wired button), clear_formatting (wired Clear Fmt), toggle_header_line (dead but latent). Added AST regression test that fails on any unpaired end. |
 | T-212 | DONE | Removed 40 identical noise "# TODO: BUG: Silent blanket exception handler" tags (comments only, 9 files) — false-positive residue of the hallucinated static-analysis wave |
+
+## HUNT sweep (18.07, claude-opus — findings only, verified, NOT fixed)
+Signal order walked; each confirmed by code-read or observed error. No fixes applied.
+
+| ID | Sev | Status | Finding (evidence) |
+|---|---|---|---|
+| H-301 | P2 | TODO | Undo-state file corrupts under concurrent writes. `_save_undo_state` spawns a daemon thread PER push that writes `<db>_undo.json` non-atomically (direct open+json.dump, no temp+rename, no lock). Rapid pushes interleave -> corrupt file. OBSERVED: "Failed to load undo state: Extra data: line 1 column 12158234". Fix: single serialized writer + atomic temp-file rename. |
+| H-302 | P3 | TODO | Undo-state file bloat. Each push serializes deepcopies of ALL categories + presets; persisted history has no size cap. OBSERVED: data/local_data_v15_undo.json = 12.3 MB. Slow async I/O + compounds H-301. Fix: cap persisted entries / store lighter snapshots. |
+| H-303 | P3 | TODO | del_category leaks per-category state. main.py:3513 removes only cats_order / categories[cat] / current_pages[cat]. Orphans forever: temp_presets_all, archive_temp_presets_all, pinned_silos_all, silo_ticked_all, silo_children_all, silo_collapsed_all, silo_colors_all, silo_folders_all, silo_last_edited_all[cat] AND that category's on-disk file folders (not trashed). |
+| H-304 | P3 | TODO | Archive silo file-container collision. `_silo_folder_name` returns the plain title slug when is_archive=True (main.py ~677), so two archived silos with the same title still share one folder. The per-slot map fix (active silos) does not cover archive. |
+| H-305 | P3 | TODO | Cross-restart undo file-restore gap. `_folder_trash_log` is an in-memory instance attr (not persisted). If the app restarts between a silo delete/clear and the undo, the original->trash mapping is lost, so files won't auto-restore (they remain in _trash for manual rescue). Fix: persist the trash log or scan _trash by name on restore. |
