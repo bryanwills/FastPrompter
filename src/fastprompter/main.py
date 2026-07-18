@@ -1383,6 +1383,18 @@ class FastPrompter(
             self.data.get("show_line_numbers", "False") == "True",
             self.set_line_numbers,  # routes through the single source of truth
         )
+        self.cb_code_gutter = create_footer_cb(
+            "🔢 Auto # on Code",
+            "Auto-show line numbers inside ``` code blocks even when the gutter\n"
+            "is off. Off by default so the Line Numbers toggle stays a clean on/off.",
+            self.data.get("code_auto_gutter", "False") == "True",
+            lambda checked: (
+                self.data.update({"code_auto_gutter": "True" if checked else "False"})
+                or self.mark_dirty()
+                or self.text_area.update_line_number_area_width()
+                or self.text_area.line_number_area.update()
+            ),
+        )
         # keep the header pin button in sync with the always-on-top checkbox
         self.cb_top.toggled.connect(
             lambda c: hasattr(self, "btn_pin_top") and self.btn_pin_top.setChecked(c))
@@ -1661,7 +1673,7 @@ class FastPrompter(
         groups_row.addWidget(_vline())
         groups_row.addLayout(_settings_group("Editor", [
             self.cb_focus, self.cb_wrap, self.cb_ctrl_c, self.cb_lock_cursor,
-            self.cb_line_numbers, self.cb_line_marks, self.cb_zebra, self.cb_double_line, self.cb_bold_titles,
+            self.cb_line_numbers, self.cb_code_gutter, self.cb_line_marks, self.cb_zebra, self.cb_double_line, self.cb_bold_titles,
             div_row, hdr_row
         ]), 1)
         groups_row.addWidget(_vline())

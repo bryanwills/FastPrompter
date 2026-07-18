@@ -133,13 +133,18 @@ class VaultTextEdit(QTextEdit):
                 self.update_line_number_area_width()
 
     def _gutter_active(self):
-        """Line numbers show when the user turned them on OR the document
-        contains fenced code blocks (auto-numbering for code)."""
+        """The line-number gutter follows the user's toggle alone — a reliable
+        master on/off. (It used to force itself on whenever the document held
+        a code block, which made the # toggle appear dead on code silos.)
+        Code auto-numbering is opt-in via the 'code_auto_gutter' setting."""
         if not hasattr(self, 'main_win'):
             return False
         if self.main_win.data.get("show_line_numbers", "False") == "True":
             return True
-        return self._doc_has_code
+        if (self.main_win.data.get("code_auto_gutter", "False") == "True"
+                and self._doc_has_code):
+            return True
+        return False
 
     def set_active_document(self, doc):
         hl = getattr(self.main_win, 'highlighter', None)

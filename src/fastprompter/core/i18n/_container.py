@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 EXTERNAL_SLOT: Final[str] = "VANILLA_TRANSLATIONS"
 
-_BUILTIN_LANGS: Final[list[str]] = ["ru", "est", "ukr", "fra", "spa"]
+_BUILTIN_LANGS: Final[list[str]] = ["ru", "est", "ukr", "fra", "spa", "ko", "pt", "it"]
 
 
 class TranslationError(RuntimeError):

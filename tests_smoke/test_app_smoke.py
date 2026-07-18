@@ -1045,6 +1045,7 @@ def test_code_fence_gutter_and_states(win):
     win.cat_combo.setCurrentIndex(0)
     win.on_tab_changed(0)
     win.data["show_line_numbers"] = "False"
+    win.data["code_auto_gutter"] = "True"  # opt-in: numbers on code w/ toggle off
     win.preview_combo.setCurrentIndex(1)  # Live Preview attaches the highlighter
     code = "intro\n```python\ndef hello():\n    return 42\n```\nafter"
     win.data["temp_presets"][:] = [code]
@@ -1052,9 +1053,10 @@ def test_code_fence_gutter_and_states(win):
     win._switch_to_slot(0, initial=True)
     ta = win.text_area
     ta._refresh_checkbox_flag()
-    # code detected -> gutter auto-appears even with line numbers off
+    # code detected -> with the opt-in gutter, numbers appear even when off
     assert ta._doc_has_code is True
     assert ta.line_number_area_width() > 0
+    win.data["code_auto_gutter"] = "False"
     # highlighter tracked the fence: inner code lines carry the CODE bit
     from fastprompter.ui.markdown_highlighter import CODE_BIT
 
@@ -1765,7 +1767,7 @@ def test_bullet_and_clear_format_dont_freeze(win):
     win.clear_formatting()  # must not raise / freeze
     ta.setPlainText("```py\nx=1\n```")
     ta._refresh_checkbox_flag()
-    assert ta.line_number_area_width() > 0  # rendering still live
+    assert ta._doc_has_code is True  # rendering pipeline still live
 
 
 def test_divider_commands_balanced_edit_blocks(win):
@@ -1787,10 +1789,10 @@ def test_divider_commands_balanced_edit_blocks(win):
     doc.undo()
     assert ta.toPlainText() == "world"
 
-    # rendering still live afterwards (gutter reacts to a code fence)
+    # rendering still live afterwards (code detection still fires)
     ta.setPlainText("```python\nx=1\n```")
     ta._refresh_checkbox_flag()
-    assert ta.line_number_area_width() > 0
+    assert ta._doc_has_code is True
 
 
 def test_toolbar_reorder_persists_and_self_heals(win):
@@ -1917,6 +1919,29 @@ def test_ctrl_shift_click_toggles_tick_when_disabled(win):
     assert not b._btn_tick.isHidden()  # mark shows even though ticks disabled
     b.mousePressEvent(ev)
     assert 0 not in win.data["silo_ticked"]
+
+
+def test_line_numbers_toggle_wins_over_code(win):
+    # Regression: the gutter force-showed itself whenever the doc had a code
+    # block, so toggling line numbers off did nothing on code silos.
+    ta = win.text_area
+    ta.setPlainText("```py\nx=1\n```")
+    ta._refresh_checkbox_flag()
+    win.data["code_auto_gutter"] = "False"
+
+    win.set_line_numbers(False)
+    assert ta.line_number_area_width() == 0  # toggle OFF hides even with code
+    win.set_line_numbers(True)
+    assert ta.line_number_area_width() > 0
+    win.set_line_numbers(False)
+    assert ta.line_number_area_width() == 0
+
+    # opt-in auto-code-gutter still shows numbers on code with the toggle off
+    win.data["code_auto_gutter"] = "True"
+    ta.update_line_number_area_width()
+    assert ta.line_number_area_width() > 0
+    win.data["code_auto_gutter"] = "False"
+    ta.update_line_number_area_width()
 
 
 def test_header_line_number_button_fast_toggles(win):
