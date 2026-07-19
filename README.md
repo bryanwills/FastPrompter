@@ -16,7 +16,7 @@ One hotkey. Instant window. Your prompts, notes and drafts — always one keystr
 <br>
 
 [English](GUIDE_EN.md) · [Русский](GUIDE_RU.md)
-<img width="960" height="540" alt="clipboard_20260717_085614_38a3b3de" src="https://github.com/user-attachments/assets/728fb3ec-a5e5-44bf-b8b4-3ec9b4cee74a" />
+<img alt="Main interface" src="docs/images/2026-07-19_054929.png" />
 
 </div>
 
@@ -25,7 +25,7 @@ One hotkey. Instant window. Your prompts, notes and drafts — always one keystr
 Press `Alt+X` anywhere — in your browser, IDE, terminal — and FastPrompter pops up at your cursor with everything you keep: auto-saved scratchpads (**silos**), reusable **snippets** on `F1`–`F10`, per-project tabs, and an archive. Press `Esc`, it vanishes. Everything lives in one folder, saved in real time. No cloud, no accounts, no telemetry.
 
 ## ✨ What it does
-<img width="960" height="285" alt="2026-07-10 21-23-03" src="https://github.com/user-attachments/assets/629d68f6-effd-4ebe-a06f-0b107e8f7c05" />
+<img alt="What it does preview" src="docs/images/2026-07-19_054806.png" />
 
 [_Cursor_](https://www.deviantart.com/potatoddas/art/Simple-Perfect-Cursors-946177131)
 
@@ -126,19 +126,22 @@ Press `Alt+X` anywhere — in your browser, IDE, terminal — and FastPrompter p
 ## 📸 Screenshots
 
 <div align="center">
-<img width="960" height="540" alt="clipboard_20260717_085619_fc657a3c" src="https://github.com/user-attachments/assets/9634037a-d3b2-4119-9e36-0be7ecc2a589" />
-<img width="959" height="539" alt="clipboard_20260717_085639_d6aa4640" src="https://github.com/user-attachments/assets/7762e459-50c8-4f98-b37e-5e55fe2e478d" />
+<img alt="Screenshot 1" src="docs/images/2026-07-19_054758.png" />
+<img alt="Screenshot 2" src="docs/images/2026-07-19_054734.png" />
 </div>
 
 <details>
 <summary><b>More screenshots</b></summary>
 <div align="center">
-<img width="428" height="351" alt="clipboard_20260717_085648_8a862e81" src="https://github.com/user-attachments/assets/31ace5ca-e1ec-414e-9b22-8986b83e6557" />
-<img width="960" height="540" alt="clipboard_20260717_085753_bedafc9b" src="https://github.com/user-attachments/assets/fe691c5a-8ea2-447e-af71-81e789b20492" />
-<img width="960" height="540" alt="clipboard_20260717_085756_24205876" src="https://github.com/user-attachments/assets/4995364c-a017-4f49-b296-71df9d59df4f" />
-<img width="960" height="540" alt="clipboard_20260717_085759_5c027b92" src="https://github.com/user-attachments/assets/64fa4aa7-9abd-4703-b996-c7fe0807de1c" />
-<img width="960" height="540" alt="clipboard_20260717_085806_c8b01cc2" src="https://github.com/user-attachments/assets/7e893326-eeed-4246-8862-e9e1d9b024f0" />
-<img width="960" height="540" alt="clipboard_20260717_085809_5ad51055" src="https://github.com/user-attachments/assets/e9bcab22-404d-49c6-ab67-d8cf13aeb767" />
+
+<img alt="Little window 1" src="docs/images/2026-07-19_054908.png" />
+<img alt="Little window 2" src="docs/images/2026-07-19_054903.png" />
+<img alt="Little window 3" src="docs/images/2026-07-19_054854.png" />
+<img alt="Little window 4" src="docs/images/2026-07-19_054846.png" />
+
+<img alt="Screenshot 3" src="docs/images/2026-07-19_054658.png" />
+<img alt="Screenshot 4" src="docs/images/2026-07-19_054643.png" />
+<img alt="Screenshot 5" src="docs/images/2026-07-19_054617.png" />
 
 </div>
 </details>
