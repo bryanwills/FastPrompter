@@ -542,9 +542,17 @@ class VaultTextEdit(QTextEdit):
             stripped = text.lstrip()
             indent = text[:len(text) - len(stripped)]
             if stripped.startswith("[x] ") or stripped.startswith("[X] "):
-                new_text = f"{indent}[ ] {stripped[4:]}"
+                content = stripped[4:]
+                # Strip ~~strikethrough~~ when unchecking
+                if content.startswith("~~") and content.endswith("~~") and len(content) >= 4:
+                    content = content[2:-2]
+                new_text = f"{indent}[ ] {content}"
             elif stripped.startswith("[ ] "):
-                new_text = f"{indent}[x] {stripped[4:]}"
+                content = stripped[4:]
+                # Wrap in ~~strikethrough~~ when checking as done
+                if content and not (content.startswith("~~") and content.endswith("~~")):
+                    content = f"~~{content}~~"
+                new_text = f"{indent}[x] {content}"
             else:
                 return
             bcursor = QTextCursor(block)
@@ -583,14 +591,24 @@ class VaultTextEdit(QTextEdit):
                     self._toggle_single_line(cb_block)
                     event.accept()
                     return
-                # Handle anchor/link clicks (replaces removed anchorClicked signal in Qt 6.8+)
-                cursor = self.cursorForPosition(event.pos())
-                if cursor.charFormat().isAnchor():
-                    url = QUrl(cursor.charFormat().anchorHref())
-                    if url.isValid():
-                        QDesktopServices.openUrl(url)
-                        event.accept()
-                        return
+                # Handle anchor/link clicks — Ctrl+click opens, Ctrl+Shift+click opens folder
+                mods = event.modifiers()
+                if mods & Qt.KeyboardModifier.ControlModifier:
+                    cursor = self.cursorForPosition(event.pos())
+                    if cursor.charFormat().isAnchor():
+                        url = QUrl(cursor.charFormat().anchorHref())
+                        if url.isValid():
+                            if mods & Qt.KeyboardModifier.ShiftModifier and url.isLocalFile():
+                                import subprocess
+                                path = os.path.normpath(url.toLocalFile())
+                                if os.name == 'nt':
+                                    subprocess.run(["explorer", "/select,", path])
+                                else:
+                                    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+                            else:
+                                QDesktopServices.openUrl(url)
+                            event.accept()
+                            return
         except Exception as e:
             logger.debug(f"checkbox/anchor mouse error: {e}")
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -933,6 +951,15 @@ class VaultTextEdit(QTextEdit):
                             self.insertPlainText(f"[{name}](file:///{clean_path})")
             return
         if source.hasText():
+            text = source.text().strip().strip('\"')
+            # Plain text file path — insert as markdown link
+            if text and len(text) < 260 and "\n" not in text:
+                normalized = os.path.normpath(text)
+                if os.path.exists(normalized):
+                    name = os.path.basename(normalized)
+                    clean_path = normalized.replace(os.sep, '/')
+                    self.insertPlainText(f"[{name}](file:///{clean_path})")
+                    return
             self.insertPlainText(source.text())
 
     def wheelEvent(self, event):
@@ -984,6 +1011,10 @@ class VaultTextEdit(QTextEdit):
                 mw.apply_header_timestamp(); event.accept(); return
             if matches("hk_bold", "Ctrl+B"):
                 mw.apply_bold_smart(); event.accept(); return
+            if matches("hk_italic", "Ctrl+I"):
+                mw.apply_format("italic"); event.accept(); return
+            if matches("hk_underline", "Ctrl+U"):
+                mw.apply_format("underline"); event.accept(); return
             if matches("hk_undo", "Ctrl+Z"):
                 if hasattr(mw, "_smart_undo"): mw._smart_undo()
                 event.accept(); return
@@ -1004,13 +1035,9 @@ class VaultTextEdit(QTextEdit):
             if matches("hk_snap", "Ctrl+Q"):
                 mw.cycle_snap_corner(); event.accept(); return
 
-        if mods == Qt.KeyboardModifier.ControlModifier and event.key() in (
-            Qt.Key.Key_B, Qt.Key.Key_I, Qt.Key.Key_U, Qt.Key.Key_T
-        ):
-            # Markdown marker toggles for non-configurable ones — must run before QTextEdit's built-in
-            if event.key() == Qt.Key.Key_I: mw.apply_format("italic")
-            elif event.key() == Qt.Key.Key_U: mw.apply_format("underline")
-            elif event.key() == Qt.Key.Key_T: mw.apply_format("strike")
+        if mods == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_T:
+            # Strikethrough is non-configurable (not in hotkey settings)
+            mw.apply_format("strike")
             event.accept()
             return
 
@@ -1076,6 +1103,17 @@ class VaultTextEdit(QTextEdit):
                     self.textCursor().insertText("\n".join(links))
                     event.accept()
                     return
+            # Plain text file path in clipboard — insert as markdown link
+            if clipboard.mimeData().hasText():
+                text = clipboard.text().strip().strip('\"')
+                if text and len(text) < 260 and "\n" not in text:
+                    normalized = os.path.normpath(text)
+                    if os.path.exists(normalized):
+                        name = os.path.basename(normalized)
+                        clean_path = normalized.replace(os.sep, '/')
+                        self.textCursor().insertText(f"[{name}](file:///{clean_path})")
+                        event.accept()
+                        return
 
         if event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab) and mods in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier):
             cursor = self.textCursor()
@@ -1274,8 +1312,17 @@ class VaultTextEdit(QTextEdit):
                         text = block.text()
                         stripped = text.lstrip()
 
-                        # Zebra background
-                        if zebra_enabled and bnum % 2 == 1:
+                        # Full-width dark panel background for code fences + code content
+                        is_code_block = not is_large and (
+                            (max(0, block.userState()) & 256)  # CODE_BIT = 1 << 8
+                            or stripped.startswith("```")
+                        )
+                        if is_code_block:
+                            code_line_rect = QRectF(0, br.top(), vp_rect.width(), br.height())
+                            painter.fillRect(code_line_rect, QColor("#161616"))
+
+                        # Zebra background — skip for code blocks (have own bg)
+                        if zebra_enabled and bnum % 2 == 1 and not is_code_block:
                             line_rect = QRectF(0, br.top(), vp_rect.width(), br.height())
                             painter.fillRect(line_rect, zebra_odd)
 
@@ -1441,9 +1488,17 @@ class VaultTextEdit(QTextEdit):
                 continue
             indent = text[:len(text) - len(stripped)]
             if stripped.startswith("[x] ") or stripped.startswith("[X] "):
-                new_text = f"{indent}{stripped[4:]}"
+                content = stripped[4:]
+                # Strip ~~strikethrough~~ when unchecking or removing checkbox
+                if content.startswith("~~") and content.endswith("~~") and len(content) >= 4:
+                    content = content[2:-2]
+                new_text = f"{indent}{content}"
             elif stripped.startswith("[ ] "):
-                new_text = f"{indent}[x] {stripped[4:]}"
+                content = stripped[4:]
+                # Wrap in ~~strikethrough~~ when checking as done
+                if content and not (content.startswith("~~") and content.endswith("~~")):
+                    content = f"~~{content}~~"
+                new_text = f"{indent}[x] {content}"
             else:
                 new_text = f"{indent}[ ] {stripped}"
             if new_text != text:

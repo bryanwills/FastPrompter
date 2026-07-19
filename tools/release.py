@@ -98,7 +98,9 @@ def main():
                 }
             ).encode(),
         )
-        print(f"Created release {rel['html_url']}")
+        if not rel or 'id' not in rel:
+            raise SystemExit(f"Failed to create release: {rel}")
+        print(f"Created release {rel.get('html_url', '')}")
     else:
         api(
             f"/repos/{REPO}/releases/{rel['id']}",

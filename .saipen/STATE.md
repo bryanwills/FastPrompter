@@ -1,12 +1,12 @@
 ---
-phase: DONE
-task: "T-404 Live FULL-UI retranslation"
-next_action: "Wait for further instructions or proceed to T-405."
+phase: HUNT
+task: "Audit hotkey claims vs registration"
+next_action: "Audit all tooltip-advertised shortcuts for actual registration; fix mismatches"
 blocker: ""
-agent: antigravity
+agent: codebuff
 mode: full
 requires: [filesystem, python, shell, git]
-updated: 2026-07-19T05:30:00
+updated: 2026-07-19T07:30:00
 ---
 ## Handoff (for the next agent)
 Three-pass auto-translate complete. 636 keys resolved:

@@ -594,6 +594,19 @@ class DraggableSiloButton(QWidget):
         if hasattr(self.main_win, 'open_file_container'):
             self.main_win.open_file_container(self.global_idx, is_archive=self.is_archive)
 
+    @staticmethod
+    def _dim_color(hex_color):
+        """Return a dimmed/grayed version of hex_color for ticked silos."""
+        from PyQt6.QtGui import QColor
+        c = QColor(hex_color)
+        if not c.isValid():
+            return hex_color
+        # Mix with gray: 60% original + 40% medium gray
+        r = int(c.red() * 0.6 + 128 * 0.4)
+        g = int(c.green() * 0.6 + 128 * 0.4)
+        b = int(c.blue() * 0.6 + 128 * 0.4)
+        return QColor(r, g, b).name()
+
     def _is_ticked(self):
         ticked = self.main_win.data.get("silo_ticked", [])
         return isinstance(ticked, list) and self.global_idx in ticked
@@ -727,6 +740,7 @@ class DraggableSiloButton(QWidget):
         base_size = 10
         f.setPointSizeF(max(8.0, base_size * scale))
         f.setBold(title_bold)
+        f.setStrikeOut(is_ticked)
         self._lbl_text.setFont(f)
         f2 = QFont(f)
         f2.setBold(False)
@@ -755,7 +769,8 @@ class DraggableSiloButton(QWidget):
             }}
         """)
         # Style the text labels transparent (inherits parent bg/border)
-        self._lbl_text.setStyleSheet(f"background: transparent; color: {text_color}; padding: 0 2px; border: none;")
+        tick_color = self._dim_color(text_color) if is_ticked else text_color
+        self._lbl_text.setStyleSheet(f"background: transparent; color: {tick_color}; padding: 0 2px; border: none;")
         self._lbl_count.setStyleSheet(f"background: transparent; color: {text_color}; padding: 0 2px; border: none;")
         self.show()
 

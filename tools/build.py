@@ -17,7 +17,6 @@ def _ensure_nuitka():
 
 def build_with_nuitka():
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    os.chdir(project_root)
 
     _ensure_nuitka()
 
@@ -49,7 +48,7 @@ def build_with_nuitka():
     env["PYTHONPATH"] = os.path.join(project_root, "src") + os.pathsep + env.get("PYTHONPATH", "")
 
     try:
-        subprocess.run(cmd, check=True, env=env)
+        subprocess.run(cmd, check=True, env=env, cwd=project_root)
         print("\n[SUCCESS] Build complete! Executable is in 'build' directory.")
         build_dir = os.path.join(project_root, "build")
         if os.path.exists(build_dir):

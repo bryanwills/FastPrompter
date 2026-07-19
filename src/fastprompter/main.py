@@ -5027,11 +5027,12 @@ class FastPrompter(
             self._app_shortcuts.append(shortcut)
 
         add_fixed("Ctrl+Shift+Z", self.redo_action)
+        add_fixed("Ctrl+Shift+C", self.clear_text)
         add_fixed("Alt+W", self.insert_old_add_line, Qt.ShortcutContext.ApplicationShortcut)
         add_fixed("Alt+Up", lambda: self.navigate_silo(-1), Qt.ShortcutContext.ApplicationShortcut)
         add_fixed("Alt+Down", lambda: self.navigate_silo(1), Qt.ShortcutContext.ApplicationShortcut)
-        add_fixed("Ctrl+I", lambda: self.apply_format("italic"))
-        add_fixed("Ctrl+U", lambda: self.apply_format("underline"))
+        add_shortcut("hk_italic", "Ctrl+I", lambda: self.apply_format("italic"))
+        add_shortcut("hk_underline", "Ctrl+U", lambda: self.apply_format("underline"))
         add_fixed("Ctrl+T", lambda: self.apply_format("strike"))
 
         for i in range(1, 11):
