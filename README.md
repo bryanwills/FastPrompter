@@ -263,6 +263,7 @@ uv run pytest tests_smoke/   # 104 integration tests — boots the real app offs
 MIT — see [`LICENSE`](LICENSE).
 
 ---
+<img width="1920" height="1080" alt="2026-07-19_190732" src="https://github.com/user-attachments/assets/526bc4f5-45e3-4c92-ac39-4bd2e3dc6065" />
 
 <div align="center">
 <sub>Built with Python, PyQt6 and ❤️ by <a href="https://github.com/vacterro">vacterro</a></sub>
