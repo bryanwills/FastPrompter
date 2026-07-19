@@ -1223,7 +1223,7 @@ class FastPrompter(
         self.btn_project_run.clicked.connect(self._launch_silo_executable)
         self.btn_project_run.hide()
 
-        self.btn_project_folder = QPushButton("📂")
+        self.btn_project_folder = QPushButton("🗂️")
         self.btn_project_folder.setToolTip(tr("Open Project Folder", getattr(self, "_current_lang", "EN")))
         self.apply_button_size(self.btn_project_folder, 20)
         self.btn_project_folder.clicked.connect(self._open_silo_project_folder)
